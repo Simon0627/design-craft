@@ -6,28 +6,10 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from app.api.deps import getImageAssetService, getKodoClient
 from app.clients.kodo import KodoClient
-from app.schemas.upload import UploadFileResponse, UploadTokenRequest, UploadTokenResponse
+from app.schemas.upload import UploadFileResponse
 from app.services.image_assets import ImageAssetService
 
 router = APIRouter()
-
-
-@router.post("/token", response_model=UploadTokenResponse)
-async def createUploadToken(
-    request: UploadTokenRequest,
-    kodoClient: KodoClient = Depends(getKodoClient),
-) -> UploadTokenResponse:
-    objectKey = request.key or kodoClient.buildObjectKey(request.fileName, request.prefix)
-    token = kodoClient.createUploadToken(objectKey, request.expiresIn)
-    return UploadTokenResponse(
-        bucketName=kodoClient.settings.qiniuBucketName,
-        bucketDomain=kodoClient.normalizedBucketDomain,
-        uploadHost=kodoClient.settings.qiniuUploadHost,
-        uploadUrl=f"https://{kodoClient.settings.qiniuUploadHost}",
-        key=objectKey,
-        fileName=request.fileName,
-        token=token,
-    )
 
 
 @router.post("/file", response_model=UploadFileResponse)

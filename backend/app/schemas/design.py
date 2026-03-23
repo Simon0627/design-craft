@@ -17,6 +17,8 @@ class DesignPlan(BaseModel):
     aspectRatio: str = Field(default="16:9", description="建议输出比例")
     shouldUseSearch: bool = Field(default=False, description="是否需要额外搜索")
     searchQueries: list[str] = Field(default_factory=list, description="搜索查询词")
+    contentSearchQueries: list[str] = Field(default_factory=list, description="文本搜索查询词")
+    imageSearchQueries: list[str] = Field(default_factory=list, description="图片搜索查询词")
     selectedSkillNames: list[str] = Field(default_factory=list, description="建议使用的技能名")
     assetUrls: list[str] = Field(default_factory=list, description="参与本次生成的素材地址")
     referenceLinks: list[str] = Field(default_factory=list, description="用户提供的参考链接")

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import importlib
 from typing import Optional
 
-from app.schemas.design import DesignPlan
 from app.schemas.skill import SkillDescriptor
 from tests.helpers import createTestClient
 
@@ -64,85 +64,10 @@ class FakeImageAssetService:
         return None
 
 
-class FakeDesignService:
-    async def planDesign(self, request):
-        return DesignPlan(
-            intentSummary=request.userInput,
-            generationMode="text_to_image",
-            prompt=request.userInput,
-            aspectRatio="16:9",
-            shouldUseSearch=False,
-            searchQueries=[],
-            selectedSkillNames=[],
-            assetUrls=request.assetUrls,
-            referenceLinks=request.referenceLinks,
-            notes=[],
-        )
-
-    async def generateDesign(self, request):
-        plan = await self.planDesign(request)
-        return {
-            "plan": plan,
-            "taskId": "task-1",
-            "status": "submitted",
-            "statusMessage": "任务已提交",
-            "created": None,
-            "resultUrls": [],
-            "storedResults": [],
-            "rawTask": {"task_id": "task-1"},
-        }
-
-    async def getTaskStatus(self, taskId: str, autoStoreResult: bool = True, outputKeyPrefix: str = "generated"):
-        return {
-            "taskId": taskId,
-            "status": "processing",
-            "statusMessage": "处理中",
-            "created": 123,
-            "resultUrls": [],
-            "storedResults": [],
-            "rawTask": {"task_id": taskId},
-        }
-
-
-def testListSkillsRoute() -> None:
-    with createTestClient() as client:
-        client.app.state.skillService = FakeSkillService()
-        client.app.state.imageAssetService = FakeImageAssetService()
-        client.app.state.kodoClient = FakeKodoClient()
-        client.app.state.designService = FakeDesignService()
-        response = client.get("/api/v1/designs/skills")
-    assert response.status_code == 200
-    assert response.json()[0]["name"] == "image-edit"
-
-
-def testCreateUploadTokenRoute() -> None:
-    with createTestClient() as client:
-        client.app.state.skillService = FakeSkillService()
-        client.app.state.imageAssetService = FakeImageAssetService()
-        client.app.state.kodoClient = FakeKodoClient()
-        client.app.state.designService = FakeDesignService()
-        response = client.post("/api/v1/uploads/token", json={"fileName": "demo.png"})
-    assert response.status_code == 200
-    assert response.json()["key"] == "uploads/demo.png"
-
-
-def testPlanRoute() -> None:
-    with createTestClient() as client:
-        client.app.state.skillService = FakeSkillService()
-        client.app.state.imageAssetService = FakeImageAssetService()
-        client.app.state.kodoClient = FakeKodoClient()
-        client.app.state.designService = FakeDesignService()
-        response = client.post("/api/v1/designs/plan", json={"userInput": "生成一张海报"})
-    assert response.status_code == 200
-    assert response.json()["plan"]["generationMode"] == "text_to_image"
-
-
 def testUploadFileRoute() -> None:
     with createTestClient() as client:
-        client.app.state.skillService = FakeSkillService()
         client.app.state.imageAssetService = FakeImageAssetService()
         client.app.state.kodoClient = FakeKodoClient()
-        client.app.state.designService = FakeDesignService()
         response = client.post(
             "/api/v1/uploads/file",
             data={"prefix": "references"},
@@ -155,10 +80,8 @@ def testUploadFileRoute() -> None:
 
 def testUploadFileRouteConvertsWebp() -> None:
     with createTestClient() as client:
-        client.app.state.skillService = FakeSkillService()
         client.app.state.imageAssetService = FakeImageAssetService()
         client.app.state.kodoClient = FakeKodoClient()
-        client.app.state.designService = FakeDesignService()
         response = client.post(
             "/api/v1/uploads/file",
             data={"prefix": "references"},
@@ -171,10 +94,8 @@ def testUploadFileRouteConvertsWebp() -> None:
 
 def testUploadFileRouteRejectsSmallImage() -> None:
     with createTestClient() as client:
-        client.app.state.skillService = FakeSkillService()
         client.app.state.kodoClient = FakeKodoClient()
-        client.app.state.designService = FakeDesignService()
-        client.app.state.imageAssetService = __import__("app.services.image_assets", fromlist=["ImageAssetService"]).ImageAssetService()
+        client.app.state.imageAssetService = importlib.import_module("app.services.image_assets").ImageAssetService()
         response = client.post(
             "/api/v1/uploads/file",
             data={"prefix": "references"},

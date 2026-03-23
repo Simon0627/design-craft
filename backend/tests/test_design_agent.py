@@ -76,6 +76,8 @@ def testPlanDesignCanParseFencedJson() -> None:
           "aspectRatio": "1:1",
           "shouldUseSearch": false,
           "searchQueries": [],
+          "contentSearchQueries": ["产品主图 电商案例"],
+          "imageSearchQueries": ["白底主图 灯光"],
           "selectedSkillNames": ["image-edit"],
           "assetUrls": [],
           "referenceLinks": [],
@@ -92,6 +94,7 @@ def testPlanDesignCanParseFencedJson() -> None:
     assert plan.generationMode == "image_to_image"
     assert plan.aspectRatio == "16:9" or plan.aspectRatio == "1:1"
     assert plan.selectedSkillNames == ["image-edit"]
+    assert plan.contentSearchQueries == ["产品主图 电商案例"]
     assert plan.assetUrls == ["https://example.com/a.png"]
 
 
@@ -104,6 +107,8 @@ def testGenerateDesignBuildsMultiImagePayload() -> None:
           "aspectRatio": "16:9",
           "shouldUseSearch": false,
           "searchQueries": [],
+          "contentSearchQueries": [],
+          "imageSearchQueries": [],
           "selectedSkillNames": [],
           "assetUrls": [],
           "referenceLinks": [],

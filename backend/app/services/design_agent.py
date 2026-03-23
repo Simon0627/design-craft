@@ -47,6 +47,8 @@ class DesignAgentService:
                 '  "aspectRatio": "16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 3:2 | 2:3 | 21:9",',
                 '  "shouldUseSearch": "boolean",',
                 '  "searchQueries": ["string"],',
+                '  "contentSearchQueries": ["string"],',
+                '  "imageSearchQueries": ["string"],',
                 '  "selectedSkillNames": ["string"],',
                 '  "assetUrls": ["string"],',
                 '  "referenceLinks": ["string"],',
@@ -66,7 +68,8 @@ class DesignAgentService:
                             "只允许选择以下 generationMode：text_to_image、image_to_image、multi_image_edit。",
                             "如果用户强制指定 generationMode，必须优先遵守。",
                             "如果素材数为 0，优先选择 text_to_image；素材数为 1，优先选择 image_to_image；素材数 >= 2，优先选择 multi_image_edit。",
-                            "searchQueries 只在明确需要额外搜索灵感、商品信息、风格案例时填写。",
+                            "contentSearchQueries 用于文本搜索，imageSearchQueries 用于图片搜索；每个字段尽量给出 1-3 条查询词。",
+                            "searchQueries 作为兼容字段，应与 contentSearchQueries 保持一致或为空。",
                             "selectedSkillNames 只能从可用技能列表中选择；没有合适技能时返回空数组。",
                             "{formatInstructions}",
                         ]
@@ -110,6 +113,9 @@ class DesignAgentService:
 
     async def generateDesign(self, request: DesignGenerateRequest) -> DesignGenerateResponse:
         plan = await self.planDesign(request)
+        return await self.generateFromPlan(plan, request)
+
+    async def generateFromPlan(self, plan: DesignPlan, request: DesignGenerateRequest) -> DesignGenerateResponse:
         await self._validateAssetsForGeneration(plan.generationMode, request.assetUrls)
         payload, multiImage = await self._buildImagePayload(plan, request)
         submitResult = await self.maasClient.createImageTask(payload, multiImage=multiImage)
@@ -136,6 +142,54 @@ class DesignAgentService:
             storedResults=[],
             rawTask=submitResult,
         )
+
+    async def refinePlanWithResearch(
+        self,
+        plan: DesignPlan,
+        contentSearchResults: dict[str, Any],
+        imageSearchResults: dict[str, Any],
+    ) -> DesignPlan:
+        contentSummary = self._summarizeResearch(contentSearchResults.get("results", []), "文本")
+        imageSummary = self._summarizeResearch(imageSearchResults.get("results", []), "图片")
+        if not contentSummary and not imageSummary:
+            return plan
+
+        promptMessages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是电商设计提示词优化助手。"
+                    "请结合已有提示词、文本搜索结果和图片搜索结果，生成更适合图片创作模型的最终提示词。"
+                    "只返回 JSON：{\"prompt\": \"...\", \"notes\": [\"...\"]}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"原始提示词：{plan.prompt}\n"
+                    f"文本搜索摘要：{contentSummary or '无'}\n"
+                    f"图片搜索摘要：{imageSummary or '无'}\n"
+                    "请输出更适合电商图片创作的提示词。"
+                ),
+            },
+        ]
+
+        try:
+            rawContent = await self.maasClient.createChatCompletion(
+                messages=promptMessages,
+                model=self.settings.qiniuChatModel,
+                maxTokens=512,
+                temperature=0.2,
+            )
+            parsed = json.loads(self._extractJson(rawContent))
+            return plan.model_copy(
+                update={
+                    "prompt": parsed.get("prompt", plan.prompt),
+                    "notes": plan.notes + parsed.get("notes", []),
+                }
+            )
+        except Exception:
+            return plan
 
     async def getTaskStatus(
         self,
@@ -177,9 +231,7 @@ class DesignAgentService:
         storedResults: list[StoredObject] = []
 
         if autoStoreResult and taskData.get("status") == "succeed":
-            for index, url in enumerate(resultUrls):
-                objectKey = self.kodoClient.buildResultKey(taskData["task_id"], index, url, outputKeyPrefix)
-                storedResults.append(await self.kodoClient.mirrorRemoteFile(url, objectKey))
+            storedResults = await self.storeGeneratedResults(taskData["task_id"], resultUrls, outputKeyPrefix)
 
         return ImageTaskStatusResponse(
             taskId=taskData["task_id"],
@@ -190,6 +242,18 @@ class DesignAgentService:
             storedResults=storedResults,
             rawTask=taskData,
         )
+
+    async def storeGeneratedResults(
+        self,
+        taskId: str,
+        resultUrls: list[str],
+        outputKeyPrefix: str = "generated",
+    ) -> list[StoredObject]:
+        storedResults: list[StoredObject] = []
+        for index, url in enumerate(resultUrls):
+            objectKey = self.kodoClient.buildResultKey(taskId, index, url, outputKeyPrefix)
+            storedResults.append(await self.kodoClient.mirrorRemoteFile(url, objectKey))
+        return storedResults
 
     def _parsePlan(
         self,
@@ -208,6 +272,9 @@ class DesignAgentService:
 
         planData = parsedPlan.model_dump()
         planData["selectedSkillNames"] = filteredSkillNames
+        planData["contentSearchQueries"] = planData.get("contentSearchQueries") or planData.get("searchQueries") or []
+        planData["imageSearchQueries"] = planData.get("imageSearchQueries") or []
+        planData["searchQueries"] = planData["contentSearchQueries"]
         planData["assetUrls"] = request.assetUrls
         planData["referenceLinks"] = request.referenceLinks
         if request.aspectRatio:
@@ -234,6 +301,8 @@ class DesignAgentService:
             aspectRatio=request.aspectRatio or self.settings.defaultAspectRatio,
             shouldUseSearch=False,
             searchQueries=[],
+            contentSearchQueries=[request.userInput[:80]],
+            imageSearchQueries=[request.userInput[:80]],
             selectedSkillNames=[],
             assetUrls=request.assetUrls,
             referenceLinks=request.referenceLinks,
@@ -319,3 +388,14 @@ class DesignAgentService:
         if not skills:
             return "无"
         return "\n".join(f"- {skill.name}: {skill.description}" for skill in skills)
+
+    def _summarizeResearch(self, results: list[dict[str, Any]], label: str) -> str:
+        if not results:
+            return ""
+        parts: list[str] = []
+        for item in results[:3]:
+            title = item.get("title", "")
+            snippet = item.get("snippet", "") or item.get("hostPageUrl", "")
+            if title or snippet:
+                parts.append(f"{label}结果：{title} {snippet}".strip())
+        return "；".join(parts)

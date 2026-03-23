@@ -34,11 +34,19 @@ class Settings(BaseSettings):
     qiniuChatModel: str = Field(default="deepseek-v3", validation_alias="QINIU_CHAT_MODEL")
     qiniuImageModel: str = Field(default="kling-v2-1", validation_alias="QINIU_IMAGE_MODEL")
 
+    serpApiKey: str = Field(default="", validation_alias="SERPAPI_API_KEY")
+    serpApiBaseUrl: str = Field(default="https://serpapi.com/search.json", validation_alias="SERPAPI_BASE_URL")
+    serpApiGoogleDomain: str = Field(default="google.com", validation_alias="SERPAPI_GOOGLE_DOMAIN")
+    serpApiGl: str = Field(default="cn", validation_alias="SERPAPI_GL")
+    serpApiHl: str = Field(default="zh-cn", validation_alias="SERPAPI_HL")
+
     defaultAspectRatio: str = Field(default="16:9", validation_alias="DEFAULT_ASPECT_RATIO")
     defaultImageCount: int = Field(default=1, validation_alias="DEFAULT_IMAGE_COUNT")
     taskPollIntervalSeconds: float = Field(default=2.0, validation_alias="TASK_POLL_INTERVAL_SECONDS")
     taskPollTimeoutSeconds: int = Field(default=120, validation_alias="TASK_POLL_TIMEOUT_SECONDS")
     plannerMaxTokens: int = Field(default=1024, validation_alias="PLANNER_MAX_TOKENS")
+    agUiDefaultImageCount: int = Field(default=1, validation_alias="AGUI_DEFAULT_IMAGE_COUNT")
+    agUiSearchResultLimit: int = Field(default=5, validation_alias="AGUI_SEARCH_RESULT_LIMIT")
 
     skillBaseDir: Path = Field(default=backendRoot / "design-skills", validation_alias="SKILL_BASE_DIR")
 
