@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any, AsyncIterator
 
@@ -138,6 +139,11 @@ class AgUiAgentService:
                     "如果用户只是咨询建议，可直接 final。"
                     "如果用户要图片，通常需要 create_image。"
                     "如果已经拿到 resultUrls 且还没有 storedResults，通常需要 store_result。"
+                    "`thinking` 和 `finalResponse` 必须始终使用自然、亲切、简洁的中文，不要返回英文，也不要中英夹杂。"
+                    "即使是思考摘要，也请直接写给用户可读的中文短句。"
+                    "除非用户明确要求英文，否则不要输出英文。"
+                    "`finalResponse` 必须是一句简短中文，不要使用 Markdown 超链接、不要输出 URL、不要写“点击查看”。"
+                    "如果图片已经生成完成，只需要简洁告诉用户“图片已经生成好了，可以继续调整”。"
                     "只返回严格 JSON："
                     "{\"thinking\":\"...\",\"actionType\":\"tool|final\",\"toolName\":\"...\",\"toolArgs\":{},\"finalResponse\":\"...\"}"
                 ),
@@ -288,7 +294,7 @@ class AgUiAgentService:
         actionType = str(decision.get("actionType") or "final")
         toolName = str(decision.get("toolName") or "")
         toolArgs = decision.get("toolArgs") if isinstance(decision.get("toolArgs"), dict) else {}
-        finalResponse = str(decision.get("finalResponse") or "")
+        finalResponse = self._sanitizeFinalResponse(str(decision.get("finalResponse") or ""), state)
         thinking = str(decision.get("thinking") or "")
 
         if actionType == "tool" and toolName not in {"search_content", "create_image", "store_result"}:
@@ -365,17 +371,39 @@ class AgUiAgentService:
         if isinstance(latestImageResult, dict):
             storedResults = latestImageResult.get("storedResults", [])
             if storedResults:
-                return f"图片已生成并转存完成，首张结果地址：{storedResults[0].get('url', '')}"
+                return "图片已经生成好了，可以继续告诉我你想怎么调整。"
             resultUrls = latestImageResult.get("resultUrls", [])
             if resultUrls:
-                return f"图片已生成，首张结果地址：{resultUrls[0]}"
+                return "图片已经生成好了，可以继续告诉我你想怎么调整。"
 
         latestSearch = state.get("latestSearch")
         if isinstance(latestSearch, dict) and latestSearch.get("results"):
-            first = latestSearch["results"][0]
-            return f"我查到一个较相关的结果：{first.get('title', '')} {first.get('link', '')}".strip()
+            return "我已经整理好相关参考信息了，你可以继续告诉我下一步想法。"
 
-        return "我已经完成分析。当前没有更多需要调用的工具。"
+        return "我已经处理好了，你可以继续告诉我下一步需求。"
+
+    def _sanitizeFinalResponse(self, text: str, state: dict[str, Any]) -> str:
+        normalized = text.strip()
+        if not normalized:
+            return self._fallbackFinalResponse(state)
+
+        normalized = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", normalized)
+        normalized = re.sub(r"https?://\S+", "", normalized)
+        normalized = normalized.replace("点击查看", "").replace("点此查看", "").replace("查看大图", "")
+        normalized = re.sub(r"\s+", " ", normalized).strip(" ，。；：\n\t")
+
+        if not normalized:
+            return self._fallbackFinalResponse(state)
+
+        if "图片" in normalized or "效果图" in normalized:
+            return "图片已经生成好了，可以继续告诉我你想怎么调整。"
+
+        if len(normalized) > 36:
+            normalized = f"{normalized[:35].rstrip('，。；： ')}。"
+        elif not normalized.endswith(("。", "！", "？")):
+            normalized = f"{normalized}。"
+
+        return normalized
 
     def _looksLikeImageRequest(self, userInput: str) -> bool:
         keywords = ("生成", "图片", "图", "海报", "主图", "效果图", "banner", "封面", "设计图")

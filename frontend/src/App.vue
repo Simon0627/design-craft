@@ -57,6 +57,15 @@ interface PreviewImage {
   source: "stored" | "temporary";
 }
 
+interface PreviewBatch {
+  id: string;
+  runId: string;
+  taskId: string;
+  title: string;
+  subtitle: string;
+  images: PreviewImage[];
+}
+
 const aspectRatioOptions = ["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"];
 const defaultPrompt =
   "参考香薰机产品图，生成一张简洁、明亮、有质感的电商主图。";
@@ -67,7 +76,8 @@ const promptText = ref(defaultPrompt);
 const aspectRatio = ref("1:1");
 const composerAssets = ref<ComposerAsset[]>([]);
 const feedEntries = ref<FeedEntry[]>([]);
-const previewImages = ref<PreviewImage[]>([]);
+const previewBatches = ref<PreviewBatch[]>([]);
+const selectedPreviewBatchId = ref("");
 const searchResults = ref<SearchResultItem[]>([]);
 const threadId = ref("");
 const activeRunId = ref("");
@@ -86,6 +96,12 @@ const uploadedAssets = computed(() =>
   composerAssets.value.filter((asset) => asset.status === "uploaded"),
 );
 const hasConversationFeed = computed(() => feedEntries.value.length > 0);
+const currentPreviewBatch = computed(() =>
+  previewBatches.value.find((batch) => batch.id === selectedPreviewBatchId.value)
+    || previewBatches.value[0]
+    || null,
+);
+const visiblePreviewImages = computed(() => currentPreviewBatch.value?.images ?? []);
 
 function createId(prefix: string): string {
   if (
@@ -365,7 +381,26 @@ function describeToolResult(
   };
 }
 
-function setPreviewImages(result: ImageToolResult): void {
+function buildPreviewBatchTitle(index: number): string {
+  return `第 ${index + 1} 轮结果`;
+}
+
+function buildPreviewBatchSubtitle(imagesCount: number, source: "stored" | "temporary"): string {
+  const sourceText = source === "stored" ? "已转存" : "临时结果";
+  return `${imagesCount} 张图片 · ${sourceText}`;
+}
+
+function extractFileName(path: string): string {
+  const normalized = path.trim();
+  if (!normalized) {
+    return "已转存图片";
+  }
+
+  const segments = normalized.split("/");
+  return segments[segments.length - 1] || normalized;
+}
+
+function setPreviewImages(result: ImageToolResult, runId: string): void {
   const nextImages: PreviewImage[] = [];
   const storedResults = Array.isArray(result.storedResults)
     ? result.storedResults
@@ -379,7 +414,7 @@ function setPreviewImages(result: ImageToolResult): void {
     nextImages.push({
       id: createId("stored"),
       url: stored.url,
-      title: stored.key || "已转存图片",
+      title: extractFileName(stored.key),
       source: "stored",
     });
   }
@@ -396,7 +431,37 @@ function setPreviewImages(result: ImageToolResult): void {
   }
 
   if (nextImages.length > 0) {
-    previewImages.value = nextImages;
+    const batchTaskId = String(result.taskId ?? "");
+    const existingIndex = previewBatches.value.findIndex(
+      (batch) =>
+        (batchTaskId && batch.taskId === batchTaskId) ||
+        (!batchTaskId && batch.runId === runId),
+    );
+    const nextSource = nextImages[0]?.source ?? "temporary";
+
+    if (existingIndex >= 0) {
+      const existing = previewBatches.value[existingIndex];
+      if (!existing) {
+        return;
+      }
+      existing.images = nextImages;
+      existing.subtitle = buildPreviewBatchSubtitle(nextImages.length, nextSource);
+      if (batchTaskId) {
+        existing.taskId = batchTaskId;
+      }
+      selectedPreviewBatchId.value = existing.id;
+    } else {
+      const nextBatch: PreviewBatch = {
+        id: createId("preview-batch"),
+        runId,
+        taskId: batchTaskId,
+        title: buildPreviewBatchTitle(previewBatches.value.length),
+        subtitle: buildPreviewBatchSubtitle(nextImages.length, nextSource),
+        images: nextImages,
+      };
+      previewBatches.value.push(nextBatch);
+      selectedPreviewBatchId.value = nextBatch.id;
+    }
   }
 
   if (result.taskId) {
@@ -439,7 +504,7 @@ function handleToolResult(toolCallId: string, content: unknown): void {
       timelineEntry.toolName === "store_result") &&
     parsed
   ) {
-    setPreviewImages(parsed as ImageToolResult);
+    setPreviewImages(parsed as ImageToolResult, activeRunId.value);
   }
 }
 
@@ -457,7 +522,7 @@ function handleStateSnapshot(snapshot: unknown): void {
     | undefined;
 
   if (latestImageResult) {
-    setPreviewImages(latestImageResult);
+    setPreviewImages(latestImageResult, activeRunId.value);
   }
 
   if (latestSearch && Array.isArray(latestSearch.results)) {
@@ -496,7 +561,8 @@ function resetConversationState(): void {
 
   composerAssets.value = [];
   feedEntries.value = [];
-  previewImages.value = [];
+  previewBatches.value = [];
+  selectedPreviewBatchId.value = "";
   searchResults.value = [];
   pendingRequestMessages.value = [];
   threadId.value = "";
@@ -756,18 +822,7 @@ function handleAgUiEvent(event: AgUiEvent): void {
 
   if (event.type === "RUN_FINISHED") {
     runSummary.status = "已完成";
-    addAgentEntry({
-      id: createId("done"),
-      kind: "agent",
-      category: "status",
-      title: "任务完成",
-      summary: "这一轮 AG-UI 运行已经结束，可以继续追问或重新生成。",
-      detail: runSummary.latestTaskId
-        ? `本轮任务 ID：${runSummary.latestTaskId}`
-        : "本轮没有额外的任务编号。",
-      status: "completed",
-      collapsed: true,
-    });
+    return;
   }
 }
 
@@ -885,10 +940,9 @@ onBeforeUnmount(() => {
     <section v-if="view === 'home'" class="home-screen">
       <div class="hero-copy">
         <span class="eyebrow">DesignCraft Agent</span>
-        <h1>让对话、工具调用和图片结果在同一个工作台里流动起来。</h1>
+        <h1>把你的想法交给我。</h1>
         <p>
-          首页先输入需求和参考图。进入工作区后，左边是一条完整的对话与 Agent
-          状态流，右边只负责看参考素材、搜索参考和最终结果。
+          你只需要描述需求、补充参考图，我会帮你整理思路、调用工具、生成图片，并把整个过程清楚地展示出来。
         </p>
       </div>
 
@@ -989,34 +1043,10 @@ onBeforeUnmount(() => {
 
     <section v-else class="conversation-screen">
       <main class="dialog-panel">
-        <div class="panel-header">
-          <div>
-            <span class="eyebrow">Conversation</span>
-            <h2>对话与 Agent 状态</h2>
-          </div>
-          <div class="header-actions">
-            <button
-              class="secondary-button"
-              :disabled="!isRunning"
-              type="button"
-              @click="stopCurrentRun"
-            >
-              停止当前运行
-            </button>
-            <button
-              class="secondary-button"
-              type="button"
-              @click="startNewConversation"
-            >
-              新建对话
-            </button>
-          </div>
-        </div>
 
         <div class="status-strip">
           <div>
             <strong>{{ runSummary.status }}</strong>
-            <span>AG-UI 后端：`/api/v1/agui/run`</span>
           </div>
           <span v-if="runSummary.latestTaskId"
             >任务 ID：{{ runSummary.latestTaskId }}</span
@@ -1026,60 +1056,69 @@ onBeforeUnmount(() => {
           }}</span>
         </div>
 
-        <div v-if="hasConversationFeed" class="feed-list">
-          <template v-for="entry in feedEntries" :key="entry.id">
-            <article
-              v-if="entry.kind === 'message'"
-              :class="['message-bubble', entry.role]"
-            >
-              <span class="message-role">
-                {{
-                  entry.role === "assistant"
-                    ? "Agent"
-                    : entry.role === "system"
-                      ? "系统"
-                      : "你"
-                }}
-              </span>
-              <p>{{ entry.content }}</p>
-            </article>
-
-            <details
-              v-else
-              class="agent-entry"
-              :open="!entry.collapsed"
-              @toggle="handleDetailsToggle(entry.id, $event)"
-            >
-              <summary class="agent-summary">
-                <span :class="['agent-dot', entry.status]" />
-                <div class="agent-copy">
-                  <p>
-                    <b>{{ entry.title }}</b
-                    >：{{ entry.summary }}
-                  </p>
-                </div>
-                <span :class="['agent-badge', entry.status]">
+        <div class="dialog-body">
+          <div v-if="hasConversationFeed" class="feed-list">
+            <template v-for="entry in feedEntries" :key="entry.id">
+              <article
+                v-if="entry.kind === 'message'"
+                :class="['message-bubble', entry.role]"
+              >
+                <span class="message-role">
                   {{
-                    entry.status === "running"
-                      ? "进行中"
-                      : entry.status === "error"
-                        ? "失败"
-                        : "已完成"
+                    entry.role === "assistant"
+                      ? "Agent"
+                      : entry.role === "system"
+                        ? "系统"
+                        : "你"
                   }}
                 </span>
-              </summary>
-              <div class="agent-detail" v-if="entry.detail">
-                <p>{{ entry.detail }}</p>
-              </div>
-            </details>
-          </template>
+                <p>{{ entry.content }}</p>
+              </article>
+
+              <details
+                v-else
+                class="agent-entry"
+                :open="!entry.collapsed"
+                @toggle="handleDetailsToggle(entry.id, $event)"
+              >
+                <summary class="agent-summary">
+                  <span :class="['agent-dot', entry.status]" />
+                  <div class="agent-copy">
+                    <p>
+                      <b>{{ entry.title }}</b
+                      >：{{ entry.summary }}
+                    </p>
+                  </div>
+                  <span :class="['agent-badge', entry.status]">
+                    {{
+                      entry.status === "running"
+                        ? "进行中"
+                        : entry.status === "error"
+                          ? "失败"
+                          : "已完成"
+                    }}
+                  </span>
+                </summary>
+                <div class="agent-detail" v-if="entry.detail">
+                  <p>{{ entry.detail }}</p>
+                </div>
+              </details>
+            </template>
+          </div>
+          <p v-else class="empty-text">
+            发送第一条消息后，左侧会按时间顺序串起对话、决策和工具调用。
+          </p>
         </div>
-        <p v-else class="empty-text">
-          发送第一条消息后，左侧会按时间顺序串起对话、决策和工具调用。
-        </p>
 
         <div class="composer-card conversation-composer">
-          <div class="composer-toolbar">
+          <textarea
+            v-model="promptText"
+            class="prompt-textarea compact"
+            placeholder="继续追问，或者换一个提示词重新生成。"
+            rows="4"
+          />
+
+          <div class="sender-footer conversation-actions">
             <label class="toolbar-button">
               追加参考图
               <input
@@ -1092,31 +1131,14 @@ onBeforeUnmount(() => {
                 "
               />
             </label>
-
-            <div class="ratio-group">
-              <button
-                v-for="option in aspectRatioOptions"
-                :key="option"
-                :class="['ratio-pill', { active: option === aspectRatio }]"
-                type="button"
-                @click="aspectRatio = option"
-              >
-                {{ option }}
-              </button>
-            </div>
-          </div>
-
-          <textarea
-            v-model="promptText"
-            class="prompt-textarea compact"
-            placeholder="继续追问，或者换一个提示词重新生成。"
-            rows="4"
-          />
-
-          <div class="sender-footer">
-            <span class="composer-hint"
-              >左侧默认只展示摘要，下拉可查看每一步的详细过程。</span
-            >
+            <label class="ratio-select">
+              <span>图片比例</span>
+              <select v-model="aspectRatio" class="ratio-select-input">
+                <option v-for="option in aspectRatioOptions" :key="option" :value="option">
+                  {{ option }}
+                </option>
+              </select>
+            </label>
             <button
               class="primary-button"
               :disabled="isRunning || !promptText.trim()"
@@ -1133,12 +1155,30 @@ onBeforeUnmount(() => {
         <section class="preview-card">
           <header class="card-header">
             <h3>结果预览</h3>
-            <span>{{ previewImages.length }} 张图片</span>
+            <span>{{ visiblePreviewImages.length }} 张图片</span>
           </header>
 
-          <div v-if="previewImages.length > 0" class="preview-grid">
+          <div v-if="previewBatches.length > 0" class="preview-history">
+            <button
+              v-for="batch in [...previewBatches].reverse()"
+              :key="batch.id"
+              :class="['history-pill', { active: batch.id === currentPreviewBatch?.id }]"
+              type="button"
+              @click="selectedPreviewBatchId = batch.id"
+            >
+              <strong>{{ batch.title }}</strong>
+              <span>{{ batch.subtitle }}</span>
+            </button>
+          </div>
+
+          <div v-if="currentPreviewBatch" class="preview-batch-meta">
+            <strong>{{ currentPreviewBatch.title }}</strong>
+            <span>{{ currentPreviewBatch.subtitle }}</span>
+          </div>
+
+          <div v-if="visiblePreviewImages.length > 0" class="preview-grid">
             <a
-              v-for="image in previewImages"
+              v-for="image in visiblePreviewImages"
               :key="image.id"
               :href="image.url"
               class="preview-item"
