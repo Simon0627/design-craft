@@ -46,22 +46,6 @@ python -m ruff check app/                        # 代码检查
 python -m ruff format app/                       # 代码格式化
 ```
 
-## SKILLs 规范
-
-SKILLs 存放在 `./backend/design-skills/<name>/SKILL.md`，必须包含 YAML frontmatter：
-
-注意：**这里的 SKILLs 是为 AI 设计 Agent 使用的，并不属于 Opencode、Codex。**
-
-```yaml
----
-name: image-edit
-description: 编辑和调整已有图片，支持裁剪、滤镜、风格转换等操作
----
-```
-
-命名规则：`^[a-z0-9]+(-[a-z0-9]+)*$`  
-描述长度：1-1024 字符，需具体以便代理正确选择。
-
 ## 代码风格
 
 ### 通用规范
