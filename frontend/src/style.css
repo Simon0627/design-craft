@@ -538,6 +538,78 @@ a {
   font-size: 13px;
 }
 
+.follow-up-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 10px 0 0 24px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(247, 250, 255, 0.98);
+  border: 1px solid rgba(214, 220, 232, 0.9);
+}
+
+.follow-up-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.follow-up-header strong {
+  color: #1d2740;
+  font-size: 14px;
+}
+
+.follow-up-header span,
+.follow-up-answer {
+  color: #607089;
+  font-size: 12px;
+}
+
+.follow-up-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.follow-up-option {
+  padding: 8px 12px;
+  border: 1px solid rgba(214, 220, 232, 0.9);
+  border-radius: 999px;
+  background: rgba(244, 247, 252, 0.92);
+  color: #30405d;
+  cursor: pointer;
+}
+
+.follow-up-option.active {
+  border-color: rgba(17, 126, 102, 0.34);
+  background: rgba(232, 245, 240, 0.94);
+  color: #0f6f59;
+}
+
+.follow-up-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.follow-up-textarea {
+  width: 100%;
+  min-height: 84px;
+  padding: 12px 14px;
+  border: 1px solid rgba(214, 220, 232, 0.9);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #172033;
+  resize: vertical;
+}
+
+.follow-up-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .conversation-composer {
   position: sticky;
   bottom: 0;

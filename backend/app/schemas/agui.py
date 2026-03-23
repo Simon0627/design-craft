@@ -25,6 +25,8 @@ class RunAgentInput(BaseModel):
 
 class ParsedAgentRequest(BaseModel):
     userInput: str
+    combinedUserContext: str = ""
+    conversationHistory: list[dict[str, str]] = Field(default_factory=list)
     assetUrls: list[str] = Field(default_factory=list)
     referenceLinks: list[str] = Field(default_factory=list)
     aspectRatio: Optional[str] = None

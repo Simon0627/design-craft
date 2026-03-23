@@ -37,6 +37,7 @@ class AgUiAgentService:
             "latestSearch": None,
             "latestImageResult": None,
             "finalResponse": None,
+            "pendingFollowUp": None,
         }
 
         yield self._event(
@@ -86,6 +87,12 @@ class AgUiAgentService:
                     yield event
                 yield self._event("STEP_FINISHED", stepName=toolName or f"tool_{iteration}")
 
+                if toolName == "ask_followup":
+                    state["phase"] = "needs_followup"
+                    yield self._event("STATE_SNAPSHOT", snapshot=state)
+                    yield self._event("RUN_FINISHED", threadId=threadId, runId=runId, result=state)
+                    return
+
             raise AppError("顶层 LLM 超过最大工具调用次数，仍未完成任务。", statusCode=500, code="agent_max_iterations")
         except Exception as exc:
             appError = exc if isinstance(exc, AppError) else AppError(
@@ -98,6 +105,15 @@ class AgUiAgentService:
 
     async def _decideNextAction(self, parsedRequest: ParsedAgentRequest, state: dict[str, Any]) -> dict[str, Any]:
         toolDescriptions = [
+            {
+                "name": "ask_followup",
+                "description": "当用户信息不足，暂时无法稳定交付高质量结果时，向用户追问关键信息。",
+                "args": {
+                    "question": "string，给用户看的追问句子",
+                    "options": "string[]，2 到 4 个可选项",
+                    "inputPlaceholder": "string，可选，提示用户也可以补充一句自己的要求",
+                },
+            },
             {
                 "name": "search_content",
                 "description": "当你需要补充商品卖点、风格参考、行业表达、营销信息时使用文本搜索。",
@@ -134,11 +150,13 @@ class AgUiAgentService:
                 "content": (
                     "你是 DesignCraft 的顶层 Agent。"
                     "你可以自由决定是否调用工具，也可以直接给出最终答复。"
-                    "你的唯一可用工具只有：search_content、create_image、store_result。"
+                    "你的唯一可用工具只有：ask_followup、search_content、create_image、store_result。"
                     "请基于当前上下文选择最合适的一步。"
                     "如果用户只是咨询建议，可直接 final。"
                     "如果用户要图片，通常需要 create_image。"
                     "如果已经拿到 resultUrls 且还没有 storedResults，通常需要 store_result。"
+                    "如果用户信息明显不足，暂时无法稳定交付高质量结果，应优先调用 ask_followup。"
+                    "ask_followup 的 question、options、inputPlaceholder 都必须是亲切自然的中文。"
                     "`thinking` 和 `finalResponse` 必须始终使用自然、亲切、简洁的中文，不要返回英文，也不要中英夹杂。"
                     "即使是思考摘要，也请直接写给用户可读的中文短句。"
                     "除非用户明确要求英文，否则不要输出英文。"
@@ -152,6 +170,8 @@ class AgUiAgentService:
                 "role": "user",
                 "content": (
                     f"用户需求：{parsedRequest.userInput}\n"
+                    f"用户上下文：{parsedRequest.combinedUserContext or parsedRequest.userInput}\n"
+                    f"对话历史：{json.dumps(parsedRequest.conversationHistory, ensure_ascii=False)}\n"
                     f"参考素材：{json.dumps(parsedRequest.assetUrls, ensure_ascii=False)}\n"
                     f"参考链接：{json.dumps(parsedRequest.referenceLinks, ensure_ascii=False)}\n"
                     f"用户指定比例：{parsedRequest.aspectRatio or '无'}\n"
@@ -206,8 +226,11 @@ class AgUiAgentService:
         parsedRequest: ParsedAgentRequest,
         state: dict[str, Any],
     ) -> Any:
+        if toolName == "ask_followup":
+            return self._sanitizeFollowUp(toolArgs, parsedRequest)
+
         if toolName == "search_content":
-            query = str(toolArgs.get("query") or parsedRequest.userInput)
+            query = str(toolArgs.get("query") or parsedRequest.combinedUserContext or parsedRequest.userInput)
             count = int(toolArgs.get("count") or self.settings.agUiSearchResultLimit)
             return await self.searchService.searchContent(query, count)
 
@@ -216,7 +239,7 @@ class AgUiAgentService:
             aspectRatio = toolArgs.get("aspectRatio") or parsedRequest.aspectRatio or self.settings.defaultAspectRatio
             imageCount = int(toolArgs.get("imageCount") or parsedRequest.imageCount or self.settings.defaultImageCount)
             generationMode = self._normalizeGenerationMode(toolArgs.get("generationMode"), assetUrls)
-            prompt = str(toolArgs.get("prompt") or parsedRequest.userInput)
+            prompt = str(toolArgs.get("prompt") or parsedRequest.combinedUserContext or parsedRequest.userInput)
 
             request = DesignGenerateRequest(
                 userInput=prompt,
@@ -272,6 +295,10 @@ class AgUiAgentService:
         raise AppError(f"不支持的工具：{toolName}", statusCode=422, code="unsupported_tool")
 
     def _updateStateFromToolResult(self, toolName: str, resultPayload: Any, state: dict[str, Any]) -> None:
+        if toolName == "ask_followup":
+            state["pendingFollowUp"] = resultPayload
+            return
+
         if toolName == "search_content":
             state["latestSearch"] = resultPayload
             return
@@ -297,7 +324,10 @@ class AgUiAgentService:
         finalResponse = self._sanitizeFinalResponse(str(decision.get("finalResponse") or ""), state)
         thinking = str(decision.get("thinking") or "")
 
-        if actionType == "tool" and toolName not in {"search_content", "create_image", "store_result"}:
+        if actionType not in {"tool", "final"}:
+            return self._fallbackDecision(parsedRequest, state)
+
+        if actionType == "tool" and toolName not in {"ask_followup", "search_content", "create_image", "store_result"}:
             return self._fallbackDecision(parsedRequest, state)
 
         return {
@@ -335,12 +365,20 @@ class AgUiAgentService:
                 }
 
         if self._looksLikeImageRequest(parsedRequest.userInput):
+            if self._shouldAskFollowUp(parsedRequest, state):
+                return {
+                    "thinking": "当前信息还不够完整，先追问几个关键点再继续会更稳妥。",
+                    "actionType": "tool",
+                    "toolName": "ask_followup",
+                    "toolArgs": self._buildFollowUp(parsedRequest),
+                    "finalResponse": "",
+                }
             return {
                 "thinking": "用户明确需要图片结果，优先调用 create_image 工具。",
                 "actionType": "tool",
                 "toolName": "create_image",
                 "toolArgs": {
-                    "prompt": parsedRequest.userInput,
+                    "prompt": parsedRequest.combinedUserContext or parsedRequest.userInput,
                     "aspectRatio": parsedRequest.aspectRatio or self.settings.defaultAspectRatio,
                     "assetUrls": parsedRequest.assetUrls,
                     "imageCount": parsedRequest.imageCount,
@@ -405,6 +443,85 @@ class AgUiAgentService:
 
         return normalized
 
+    def _sanitizeFollowUp(self, followUp: Any, parsedRequest: ParsedAgentRequest) -> dict[str, Any]:
+        if not isinstance(followUp, dict):
+            return self._buildFollowUp(parsedRequest)
+
+        question = str(followUp.get("question") or "").strip()
+        rawOptions = followUp.get("options")
+        options = [str(item).strip() for item in rawOptions] if isinstance(rawOptions, list) else []
+        options = [item for item in options if item][:4]
+        inputPlaceholder = str(followUp.get("inputPlaceholder") or "").strip()
+
+        fallback = self._buildFollowUp(parsedRequest)
+        if not question:
+            question = fallback["question"]
+        if len(options) < 2:
+            options = fallback["options"]
+        if not inputPlaceholder:
+            inputPlaceholder = fallback["inputPlaceholder"]
+
+        return {
+            "question": question,
+            "options": options,
+            "inputPlaceholder": inputPlaceholder,
+        }
+
+    def _shouldAskFollowUp(self, parsedRequest: ParsedAgentRequest, state: dict[str, Any]) -> bool:
+        if state.get("pendingFollowUp"):
+            return False
+        if parsedRequest.assetUrls:
+            return False
+        if sum(1 for item in parsedRequest.conversationHistory if item.get("role") == "user") >= 2:
+            return False
+
+        context = (parsedRequest.combinedUserContext or parsedRequest.userInput).strip()
+        if len(context) >= 28:
+            return False
+
+        detailKeywords = (
+            "法式",
+            "现代",
+            "北欧",
+            "极简",
+            "复古",
+            "电商",
+            "海报",
+            "客厅",
+            "卧室",
+            "banner",
+            "主图",
+            "暖色",
+            "冷色",
+            "高级感",
+            "明亮",
+            "ins",
+        )
+        detailCount = sum(1 for keyword in detailKeywords if keyword in context)
+        return detailCount < 2
+
+    def _buildFollowUp(self, parsedRequest: ParsedAgentRequest) -> dict[str, Any]:
+        context = parsedRequest.combinedUserContext or parsedRequest.userInput
+        if any(keyword in context for keyword in ("客厅", "卧室", "餐厅", "空间", "家装", "效果图")):
+            return {
+                "question": "我先补齐几个关键点，这样效果图会更贴近你的预期。你更偏向哪种风格？",
+                "options": ["法式奶油", "现代极简", "原木自然", "轻奢质感"],
+                "inputPlaceholder": "也可以补充空间类型、主色调，或者你特别想保留的元素。",
+            }
+
+        if any(keyword in context for keyword in ("海报", "主图", "banner", "电商", "详情页")):
+            return {
+                "question": "为了把画面做得更准一些，你更想突出哪一类信息？",
+                "options": ["产品主体", "价格促销", "品牌质感", "节日氛围"],
+                "inputPlaceholder": "也可以补充目标人群、使用场景、文案重点或配色方向。",
+            }
+
+        return {
+            "question": "我还差一点关键信息，先补充一下会更容易做出你想要的效果。你最想强调哪一项？",
+            "options": ["整体风格", "画面场景", "主视觉主体", "颜色氛围"],
+            "inputPlaceholder": "也可以直接补充一句你的具体要求，比如风格、场景、用途或参考感觉。",
+        }
+
     def _looksLikeImageRequest(self, userInput: str) -> bool:
         keywords = ("生成", "图片", "图", "海报", "主图", "效果图", "banner", "封面", "设计图")
         return any(keyword in userInput for keyword in keywords)
@@ -438,9 +555,21 @@ class AgUiAgentService:
         userText, assetUrls = self._extractContent(latestUserMessage.content)
         forwardedProps = agentInput.forwardedProps or {}
         state = agentInput.state or {}
+        conversationHistory: list[dict[str, str]] = []
+        userTexts: list[str] = []
+
+        for message in agentInput.messages[-8:]:
+            messageText, _ = self._extractContent(message.content)
+            if not messageText.strip():
+                continue
+            conversationHistory.append({"role": message.role, "content": messageText.strip()})
+            if message.role == "user":
+                userTexts.append(messageText.strip())
 
         return ParsedAgentRequest(
             userInput=userText or str(forwardedProps.get("userInput") or state.get("userInput") or ""),
+            combinedUserContext="\n".join(userTexts).strip(),
+            conversationHistory=conversationHistory,
             assetUrls=self._mergeUnique(assetUrls, forwardedProps.get("assetUrls", []), state.get("assetUrls", [])),
             referenceLinks=self._mergeUnique(forwardedProps.get("referenceLinks", []), state.get("referenceLinks", [])),
             aspectRatio=forwardedProps.get("aspectRatio") or state.get("aspectRatio"),

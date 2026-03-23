@@ -3,6 +3,12 @@ export interface AgUiEvent {
   [key: string]: unknown
 }
 
+export interface FollowUpRequest {
+  question: string
+  options: string[]
+  inputPlaceholder: string
+}
+
 export interface AgUiMessagePart {
   type: 'text' | 'image_url'
   text?: string

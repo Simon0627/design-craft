@@ -6,6 +6,7 @@ import type {
   AgUiEvent,
   AgUiMessage,
   AgUiMessagePart,
+  FollowUpRequest,
   ImageToolResult,
   RunAgentPayload,
   SearchResultItem,
@@ -66,6 +67,14 @@ interface PreviewBatch {
   images: PreviewImage[];
 }
 
+interface FollowUpCardState {
+  request: FollowUpRequest;
+  selectedOption: string;
+  inputText: string;
+  active: boolean;
+  submittedAnswer: string;
+}
+
 const aspectRatioOptions = ["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"];
 const defaultPrompt =
   "参考香薰机产品图，生成一张简洁、明亮、有质感的电商主图。";
@@ -84,6 +93,8 @@ const activeRunId = ref("");
 const currentThinkingEntryId = ref<string | null>(null);
 const activeAssistantMessageId = ref<string | null>(null);
 const pendingRequestMessages = ref<AgUiMessage[]>([]);
+const followUpCards = reactive<Record<string, FollowUpCardState>>({});
+const pendingToolNames = reactive<Record<string, string>>({});
 const runSummary = reactive({
   status: "待开始",
   latestTaskId: "",
@@ -102,6 +113,7 @@ const currentPreviewBatch = computed(() =>
     || null,
 );
 const visiblePreviewImages = computed(() => currentPreviewBatch.value?.images ?? []);
+const canSubmitPrompt = computed(() => Boolean(promptText.value.trim()));
 
 function createId(prefix: string): string {
   if (
@@ -121,6 +133,9 @@ function formatFileSize(size: number): string {
 }
 
 function toolLabel(toolName: string): string {
+  if (toolName === "ask_followup") {
+    return "向你追问";
+  }
   if (toolName === "search_content") {
     return "内容搜索";
   }
@@ -135,7 +150,7 @@ function toolLabel(toolName: string): string {
 
 function stepLabel(stepName: string): string {
   if (stepName.startsWith("llm_decision_")) {
-    return `深度思考 ${stepName.split("_").pop() ?? ""}`.trim();
+    return "深度思考";
   }
   return toolLabel(stepName);
 }
@@ -189,6 +204,52 @@ function upsertAssistantMessage(messageId: string, content: string): void {
     return;
   }
   addMessageEntry("assistant", content, messageId);
+}
+
+function ensureAssistantContextMessage(messageId: string, content: string): void {
+  const existing = pendingRequestMessages.value.find((message) => message.id === messageId);
+  if (existing) {
+    existing.content = content;
+    return;
+  }
+
+  pendingRequestMessages.value.push({
+    id: messageId,
+    role: "assistant",
+    content,
+  });
+}
+
+function getFollowUpState(entryId: string): FollowUpCardState | null {
+  return followUpCards[entryId] ?? null;
+}
+
+function setFollowUpOption(entryId: string, option: string): void {
+  const followUpState = getFollowUpState(entryId);
+  if (!followUpState || !followUpState.active) {
+    return;
+  }
+  followUpState.selectedOption = option;
+}
+
+function setFollowUpInput(entryId: string, value: string): void {
+  const followUpState = getFollowUpState(entryId);
+  if (!followUpState || !followUpState.active) {
+    return;
+  }
+  followUpState.inputText = value;
+}
+
+function canSubmitFollowUp(entryId: string): boolean {
+  const followUpState = getFollowUpState(entryId);
+  if (!followUpState || !followUpState.active || isRunning.value) {
+    return false;
+  }
+  return Boolean(followUpState.selectedOption.trim() || followUpState.inputText.trim());
+}
+
+function shouldDeferToolEntry(toolName: string): boolean {
+  return toolName === "ask_followup" || toolName === "create_image";
 }
 
 function addAgentEntry(entry: AgentFeedEntry): string {
@@ -272,6 +333,15 @@ function describeToolArgs(
     };
   }
 
+  if (toolName === "ask_followup") {
+    const question = String(payload.question ?? "");
+    const options = Array.isArray(payload.options) ? payload.options : [];
+    return {
+      summary: "还差一点关键信息，先和你确认一下。",
+      detail: `${question || "请补充更多信息。"}\n可选项：${options.join(" / ") || "无"}`,
+    };
+  }
+
   if (toolName === "create_image") {
     const prompt = String(payload.prompt ?? "");
     const imageCount = Number(payload.imageCount ?? 1);
@@ -279,7 +349,7 @@ function describeToolArgs(
     const aspect = String(payload.aspectRatio ?? aspectRatio.value);
     const generationMode = generationModeLabel(payload.generationMode);
     return {
-      summary: `开始${generationMode}，输出 ${imageCount} 张 ${aspect} 图片。`,
+      summary: `${generationMode}进行中，预计输出 ${imageCount} 张 ${aspect} 图片。`,
       detail: `提示词：${prompt || "沿用用户原始需求"}\n参考素材：${assetUrls.length} 张\n输出比例：${aspect}\n生成方式：${generationMode}`,
     };
   }
@@ -338,6 +408,15 @@ function describeToolResult(
     return {
       summary: `内容搜索已完成，共拿到 ${results.length} 条参考结果。`,
       detail: describeSearchResults(results),
+    };
+  }
+
+  if (toolName === "ask_followup") {
+    const question = String(payload.question ?? "");
+    const options = Array.isArray(payload.options) ? payload.options : [];
+    return {
+      summary: "还差一点关键信息，等你补充后我继续处理。",
+      detail: `${question || "请补充更多信息。"}\n可选项：${options.join(" / ") || "无"}`,
     };
   }
 
@@ -470,6 +549,7 @@ function setPreviewImages(result: ImageToolResult, runId: string): void {
 }
 
 function handleToolResult(toolCallId: string, content: unknown): void {
+  delete pendingToolNames[toolCallId];
   const timelineEntry = feedEntries.value.find(
     (entry): entry is AgentFeedEntry =>
       entry.kind === "agent" && entry.id === toolCallId,
@@ -486,7 +566,7 @@ function handleToolResult(toolCallId: string, content: unknown): void {
     rawText,
   );
   updateAgentEntry(toolCallId, {
-    status: "completed",
+    status: timelineEntry.toolName === "ask_followup" ? "running" : "completed",
     summary: description.summary,
     detail: description.detail,
   });
@@ -505,6 +585,20 @@ function handleToolResult(toolCallId: string, content: unknown): void {
     parsed
   ) {
     setPreviewImages(parsed as ImageToolResult, activeRunId.value);
+  }
+
+  if (timelineEntry.toolName === "ask_followup" && parsed) {
+    const followUp = parsed as unknown as FollowUpRequest;
+    followUpCards[toolCallId] = {
+      request: followUp,
+      selectedOption: "",
+      inputText: "",
+      active: true,
+      submittedAnswer: "",
+    };
+    ensureAssistantContextMessage(`followup-${toolCallId}`, followUp.question);
+    updateAgentEntry(toolCallId, { collapsed: false });
+    runSummary.status = "等待补充";
   }
 }
 
@@ -551,6 +645,42 @@ function handleDetailsToggle(entryId: string, event: Event): void {
   updateAgentEntry(entryId, { collapsed: !target.open });
 }
 
+async function submitFollowUp(entryId: string): Promise<void> {
+  const followUpState = getFollowUpState(entryId);
+  if (!followUpState || !followUpState.active || isRunning.value) {
+    return;
+  }
+
+  const answerParts = [followUpState.selectedOption.trim(), followUpState.inputText.trim()].filter(Boolean);
+  const answer = answerParts.join("；");
+  if (!answer) {
+    return;
+  }
+
+  const previousSummary = "已收到你的补充，我继续往下处理。";
+  followUpState.active = false;
+  updateAgentEntry(entryId, {
+    status: "completed",
+    summary: previousSummary,
+    detail: `追问：${followUpState.request.question}\n你的补充：${answer}`,
+    collapsed: true,
+  });
+
+  try {
+    await runAgent(answer, false);
+    delete followUpCards[entryId];
+  } catch (error) {
+    followUpState.active = true;
+    updateAgentEntry(entryId, {
+      status: "running",
+      summary: "还差一点关键信息，补充后我就继续处理。",
+      detail: `追问：${followUpState.request.question}`,
+      collapsed: false,
+    });
+    throw error;
+  }
+}
+
 function resetConversationState(): void {
   activeAbortController?.abort();
   activeAbortController = null;
@@ -564,6 +694,12 @@ function resetConversationState(): void {
   previewBatches.value = [];
   selectedPreviewBatchId.value = "";
   searchResults.value = [];
+  for (const key of Object.keys(followUpCards)) {
+    delete followUpCards[key];
+  }
+  for (const key of Object.keys(pendingToolNames)) {
+    delete pendingToolNames[key];
+  }
   pendingRequestMessages.value = [];
   threadId.value = "";
   activeRunId.value = "";
@@ -748,6 +884,15 @@ function handleAgUiEvent(event: AgUiEvent): void {
       return;
     }
 
+    if (activeAssistantMessageId.value) {
+      const messageEntry = feedEntries.value.find(
+        (entry): entry is MessageFeedEntry =>
+          entry.kind === "message" && entry.id === activeAssistantMessageId.value,
+      );
+      if (messageEntry) {
+        ensureAssistantContextMessage(messageEntry.id, messageEntry.content);
+      }
+    }
     activeAssistantMessageId.value = null;
     return;
   }
@@ -755,6 +900,10 @@ function handleAgUiEvent(event: AgUiEvent): void {
   if (event.type === "TOOL_CALL_START") {
     const toolCallId = String(event.toolCallId ?? createId("tool"));
     const toolCallName = String(event.toolCallName ?? "");
+    pendingToolNames[toolCallId] = toolCallName;
+    if (shouldDeferToolEntry(toolCallName)) {
+      return;
+    }
     addAgentEntry({
       id: toolCallId,
       kind: "agent",
@@ -763,7 +912,7 @@ function handleAgUiEvent(event: AgUiEvent): void {
       summary: `${toolLabel(toolCallName)}正在准备执行。`,
       detail: "",
       status: "running",
-      collapsed: true,
+      collapsed: toolCallName !== "ask_followup",
       toolName: toolCallName,
     });
     return;
@@ -772,10 +921,28 @@ function handleAgUiEvent(event: AgUiEvent): void {
   if (event.type === "TOOL_CALL_ARGS") {
     const toolCallId = String(event.toolCallId ?? "");
     const rawText = String(event.delta ?? "");
-    const toolEntry = feedEntries.value.find(
+    let toolEntry = feedEntries.value.find(
       (entry): entry is AgentFeedEntry =>
         entry.kind === "agent" && entry.id === toolCallId,
     );
+    if (!toolEntry) {
+      const toolCallName = pendingToolNames[toolCallId] || "";
+      addAgentEntry({
+        id: toolCallId,
+        kind: "agent",
+        category: "tool",
+        title: toolLabel(toolCallName),
+        summary: "",
+        detail: "",
+        status: "running",
+        collapsed: toolCallName !== "ask_followup",
+        toolName: toolCallName,
+      });
+      toolEntry = feedEntries.value.find(
+        (entry): entry is AgentFeedEntry =>
+          entry.kind === "agent" && entry.id === toolCallId,
+      );
+    }
     if (!toolEntry) {
       return;
     }
@@ -821,12 +988,13 @@ function handleAgUiEvent(event: AgUiEvent): void {
   }
 
   if (event.type === "RUN_FINISHED") {
-    runSummary.status = "已完成";
+    const result = (event.result ?? {}) as Record<string, unknown>;
+    runSummary.status = result.phase === "needs_followup" ? "等待补充" : "已完成";
     return;
   }
 }
 
-async function runAgent(userInput: string): Promise<void> {
+async function runAgent(userInput: string, addToFeed: boolean = true): Promise<void> {
   const normalizedInput = userInput.trim();
   if (!normalizedInput || isRunning.value) {
     return;
@@ -847,7 +1015,9 @@ async function runAgent(userInput: string): Promise<void> {
   const userMessageParts = buildUserMessageParts(normalizedInput, uploadedUrls);
   const userMessageId = createId("user");
 
-  addMessageEntry("user", normalizedInput, userMessageId);
+  if (addToFeed) {
+    addMessageEntry("user", normalizedInput, userMessageId);
+  }
   pendingRequestMessages.value.push({
     id: userMessageId,
     role: "user",
@@ -1031,7 +1201,7 @@ onBeforeUnmount(() => {
 
           <button
             class="primary-button"
-            :disabled="isRunning || !promptText.trim()"
+            :disabled="isRunning || !canSubmitPrompt"
             type="button"
             @click="handleSubmit"
           >
@@ -1102,6 +1272,51 @@ onBeforeUnmount(() => {
                 <div class="agent-detail" v-if="entry.detail">
                   <p>{{ entry.detail }}</p>
                 </div>
+                <div
+                  v-if="entry.toolName === 'ask_followup' && getFollowUpState(entry.id)"
+                  class="follow-up-card"
+                >
+                  <div class="follow-up-header">
+                    <strong>补充一点信息，我就继续处理</strong>
+                    <span>{{ getFollowUpState(entry.id)?.request.inputPlaceholder }}</span>
+                  </div>
+                  <div class="follow-up-options">
+                    <button
+                      v-for="option in getFollowUpState(entry.id)?.request.options || []"
+                      :key="option"
+                      :class="[
+                        'follow-up-option',
+                        { active: option === getFollowUpState(entry.id)?.selectedOption },
+                      ]"
+                      :disabled="!getFollowUpState(entry.id)?.active || isRunning"
+                      type="button"
+                      @click="setFollowUpOption(entry.id, option)"
+                    >
+                      {{ option }}
+                    </button>
+                  </div>
+                  <textarea
+                    class="follow-up-textarea"
+                    :disabled="!getFollowUpState(entry.id)?.active || isRunning"
+                    :placeholder="getFollowUpState(entry.id)?.request.inputPlaceholder"
+                    rows="3"
+                    :value="getFollowUpState(entry.id)?.inputText || ''"
+                    @input="setFollowUpInput(entry.id, ($event.target as HTMLTextAreaElement).value)"
+                  />
+                  <div class="follow-up-actions">
+                    <span v-if="getFollowUpState(entry.id)?.submittedAnswer" class="follow-up-answer">
+                      已补充：{{ getFollowUpState(entry.id)?.submittedAnswer }}
+                    </span>
+                    <button
+                      class="secondary-button"
+                      :disabled="!canSubmitFollowUp(entry.id)"
+                      type="button"
+                      @click="submitFollowUp(entry.id)"
+                    >
+                      提交补充
+                    </button>
+                  </div>
+                </div>
               </details>
             </template>
           </div>
@@ -1141,7 +1356,7 @@ onBeforeUnmount(() => {
             </label>
             <button
               class="primary-button"
-              :disabled="isRunning || !promptText.trim()"
+              :disabled="isRunning || !canSubmitPrompt"
               type="button"
               @click="handleSubmit"
             >

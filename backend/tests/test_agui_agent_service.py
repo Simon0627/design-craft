@@ -56,3 +56,30 @@ def testFallbackDecisionChoosesStoreResultAfterImageCreated() -> None:
     assert decision["actionType"] == "tool"
     assert decision["toolName"] == "store_result"
     assert decision["toolArgs"]["taskId"] == "task-1"
+
+
+def testFallbackDecisionChoosesAskFollowUpForVagueImageRequest() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我生成一个效果图",
+        combinedUserContext="帮我生成一个效果图",
+    )
+
+    decision = service._fallbackDecision(parsedRequest, {"latestImageResult": None, "latestSearch": None})
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "ask_followup"
+    assert len(decision["toolArgs"]["options"]) >= 2
+
+
+def testSanitizeFinalResponseRemovesLinks() -> None:
+    service = createService()
+
+    result = service._sanitizeFinalResponse(
+        "这是效果图，点击查看：[法式客厅效果图](https://example.com/a.png)",
+        {},
+    )
+
+    assert "http" not in result
+    assert "点击查看" not in result
+    assert result == "图片已经生成好了，可以继续告诉我你想怎么调整。"
