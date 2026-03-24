@@ -36,6 +36,7 @@ class AgUiAgentService:
             "phase": "started",
             "toolCalls": [],
             "latestSearch": None,
+            "latestImageUnderstanding": None,
             "latestCopyResult": None,
             "latestImageResult": None,
             "imageArtifacts": [],
@@ -127,6 +128,14 @@ class AgUiAgentService:
                 },
             },
             {
+                "name": "read_reference_images",
+                "description": "当任务依赖参考图理解时使用。适合识别产品主体、空间布局、风格元素、材质、构图、视角、应保留的部分，以及应该写进提示词的细节。",
+                "args": {
+                    "focus": "string，可选，本次读图想重点关注什么",
+                    "assetUrls": "string[]，可选，要分析的参考图列表，默认使用当前请求里的参考图",
+                },
+            },
+            {
                 "name": "create_copy",
                 "description": "当你需要先产出长图文、公众号、H5 页面所需的文案结构、段落内容、分节标题时使用。",
                 "args": {
@@ -180,17 +189,22 @@ class AgUiAgentService:
                 "content": (
                     "你是 DesignCraft 的顶层 Agent。"
                     "你可以自由决定是否调用工具，也可以直接给出最终答复。"
-                    "你的唯一可用工具只有：ask_followup、search_content、create_copy、create_image、store_result、compose_web。"
+                    "你的唯一可用工具只有：ask_followup、search_content、read_reference_images、create_copy、create_image、store_result、compose_web。"
                     "请基于当前上下文选择最合适的一步。"
                     "如果用户只是咨询建议，可直接 final。"
                     "如果用户要图片，通常需要 create_image。"
+                    "不是所有带参考图的任务都必须先 read_reference_images。"
+                    "只有当参考图理解会明显帮助你判断主体、视角、构图、材质、空间结构、应保留元素，或者能让后续文案和提示词更具体时，才调用它。"
+                    "如果任务明显依赖参考图理解，比如需要保留原图主体、视角、构图、空间结构、产品细节、材质、颜色、风格元素，"
+                    "或者你准备基于参考图去写更具体的文案和提示词，应优先调用 read_reference_images。"
+                    "read_reference_images 的结果会累积到 state.latestImageUnderstanding，你后续写 create_copy 和 create_image 参数时应该主动参考它。"
                     "如果已经拿到 resultUrls 且还没有 storedResults，通常需要 store_result。"
                     "如果用户要的是长图文、公众号排版、图文长页、H5 风格页面或可浏览的 Web 内容，"
-                    "你应该把任务拆成多步：先 search_content 补充资料，再 create_copy 生成文案结构，"
+                    "你应该把任务拆成多步：如有参考图先 read_reference_images，必要时 search_content 补充资料，再 create_copy 生成文案结构，"
                     "再按需要多次调用 create_image 为每段文本生成配图，必要时调用 store_result 固化图片地址，最后调用 compose_web 生成网页。"
                     "你可以多次循环调用 create_copy 和 create_image，不要急着一次做完。"
-                    "create_copy、create_image、store_result 这些子任务的结构化结果，都会累积在当前 state 中返回给你。"
-                    "你在决定 compose_web 时，应该优先查看 state.latestCopyResult 和 state.imageArtifacts，确认每张图对应哪一段内容。"
+                    "read_reference_images、create_copy、create_image、store_result 这些子任务的结构化结果，都会累积在当前 state 中返回给你。"
+                    "你在决定 compose_web 时，应该优先查看 state.latestCopyResult、state.latestImageUnderstanding 和 state.imageArtifacts，确认每张图对应哪一段内容。"
                     "在这类 Web 内容场景里，不要直接把 HTML 放进 finalResponse，必须通过 compose_web 工具输出。"
                     "如果用户信息明显不足，暂时无法稳定交付高质量结果，应优先调用 ask_followup。"
                     "ask_followup 的 question、options、inputPlaceholder 都必须是亲切自然的中文。"
@@ -271,6 +285,9 @@ class AgUiAgentService:
             query = str(toolArgs.get("query") or parsedRequest.combinedUserContext or parsedRequest.userInput)
             count = int(toolArgs.get("count") or self.settings.agUiSearchResultLimit)
             return await self.searchService.searchContent(query, count)
+
+        if toolName == "read_reference_images":
+            return await self._readReferenceImages(toolArgs, parsedRequest)
 
         if toolName == "create_copy":
             return await self._createCopy(toolArgs, parsedRequest, state)
@@ -385,6 +402,10 @@ class AgUiAgentService:
             state["latestSearch"] = resultPayload
             return
 
+        if toolName == "read_reference_images":
+            state["latestImageUnderstanding"] = resultPayload
+            return
+
         if toolName == "create_copy":
             state["latestCopyResult"] = resultPayload
             return
@@ -426,6 +447,7 @@ class AgUiAgentService:
         if actionType == "tool" and toolName not in {
             "ask_followup",
             "search_content",
+            "read_reference_images",
             "create_copy",
             "create_image",
             "store_result",
@@ -445,6 +467,7 @@ class AgUiAgentService:
         latestImageResult = state.get("latestImageResult")
         latestCopyResult = state.get("latestCopyResult")
         latestSearch = state.get("latestSearch")
+        latestImageUnderstanding = state.get("latestImageUnderstanding")
         latestWebResult = state.get("latestWebResult")
         imageArtifacts = self._getImageArtifacts(state)
 
@@ -455,6 +478,18 @@ class AgUiAgentService:
                 "toolName": "",
                 "toolArgs": {},
                 "finalResponse": self._fallbackFinalResponse(state),
+            }
+
+        if self._shouldReadReferenceImages(parsedRequest, state):
+            return {
+                "thinking": "我先看一下参考图里的主体、风格和细节，这样后面的文案和提示词会更准确。",
+                "actionType": "tool",
+                "toolName": "read_reference_images",
+                "toolArgs": {
+                    "focus": parsedRequest.combinedUserContext or parsedRequest.userInput,
+                    "assetUrls": parsedRequest.assetUrls,
+                },
+                "finalResponse": "",
             }
 
         if self._looksLikeWebRequest(parsedRequest.combinedUserContext or parsedRequest.userInput):
@@ -509,7 +544,7 @@ class AgUiAgentService:
                     "actionType": "tool",
                     "toolName": "create_image",
                     "toolArgs": {
-                        "prompt": self._buildImagePromptForSlot(parsedRequest, latestCopyResult, nextImageSlot),
+                        "prompt": self._buildImagePromptForSlot(parsedRequest, latestCopyResult, nextImageSlot, latestImageUnderstanding),
                         "aspectRatio": parsedRequest.aspectRatio or self.settings.defaultAspectRatio,
                         "assetUrls": parsedRequest.assetUrls,
                         "imageCount": 1,
@@ -570,7 +605,7 @@ class AgUiAgentService:
                 "actionType": "tool",
                 "toolName": "create_image",
                 "toolArgs": {
-                    "prompt": parsedRequest.combinedUserContext or parsedRequest.userInput,
+                    "prompt": self._buildDirectImagePrompt(parsedRequest, latestImageUnderstanding),
                     "aspectRatio": parsedRequest.aspectRatio or self.settings.defaultAspectRatio,
                     "assetUrls": parsedRequest.assetUrls,
                     "imageCount": parsedRequest.imageCount,
@@ -749,6 +784,42 @@ class AgUiAgentService:
         keywords = ("搜索", "查", "调研", "参考", "案例", "卖点", "竞品", "风格")
         return any(keyword in userInput for keyword in keywords)
 
+    def _shouldReadReferenceImages(self, parsedRequest: ParsedAgentRequest, state: dict[str, Any]) -> bool:
+        if not parsedRequest.assetUrls:
+            return False
+        if isinstance(state.get("latestImageUnderstanding"), dict):
+            return False
+
+        context = parsedRequest.combinedUserContext or parsedRequest.userInput
+        keywords = (
+            "参考图",
+            "原图",
+            "产品图",
+            "根据图片",
+            "保留",
+            "构图",
+            "视角",
+            "材质",
+            "细节",
+            "根据这张图",
+            "基于这张图",
+            "按这张图",
+            "按参考图",
+            "看图",
+            "读图",
+            "分析图片",
+            "分析参考图",
+            "主体不变",
+            "保持原图",
+            "保留原有",
+            "延续原图",
+            "沿用原图",
+            "空间结构",
+            "图里的",
+            "图中",
+        )
+        return any(keyword in context for keyword in keywords)
+
     def _inferGenerationMode(self, assetUrls: list[str]) -> str:
         if len(assetUrls) >= 2:
             return "multi_image_edit"
@@ -777,6 +848,8 @@ class AgUiAgentService:
         sections = max(2, min(int(toolArgs.get("sections") or 4), 8))
         latestSearch = state.get("latestSearch") if isinstance(state.get("latestSearch"), dict) else {}
         searchSummary = self._summarizeSearchResults(latestSearch.get("results", []) if isinstance(latestSearch, dict) else [])
+        imageUnderstanding = state.get("latestImageUnderstanding") if isinstance(state.get("latestImageUnderstanding"), dict) else {}
+        imageSummary = self._summarizeImageUnderstanding(imageUnderstanding)
 
         messages = [
             {
@@ -795,6 +868,7 @@ class AgUiAgentService:
                     f"整体语气：{tone}\n"
                     f"段落数量：{sections}\n"
                     f"搜索参考：{searchSummary or '无'}\n"
+                    f"参考图理解：{imageSummary or '无'}\n"
                     "请输出适合中文图文页面的结构化内容。"
                 ),
             },
@@ -817,6 +891,56 @@ class AgUiAgentService:
                 "heroImagePrompt": str(parsed.get("heroImagePrompt") or fallback["heroImagePrompt"]),
                 "sections": self._normalizeCopySections(parsed.get("sections"), fallback["sections"]),
             }
+        except Exception:
+            return fallback
+
+    async def _readReferenceImages(
+        self,
+        toolArgs: dict[str, Any],
+        parsedRequest: ParsedAgentRequest,
+    ) -> dict[str, Any]:
+        assetUrls = self._mergeUnique(toolArgs.get("assetUrls", []), parsedRequest.assetUrls)
+        if not assetUrls:
+            raise AppError("read_reference_images 缺少参考图。", statusCode=422, code="missing_reference_assets")
+
+        focus = str(toolArgs.get("focus") or parsedRequest.combinedUserContext or parsedRequest.userInput).strip()
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "请认真理解这些参考图。"
+                    "重点总结主体是什么、画面构图与视角、风格与氛围、颜色材质、应保留的关键元素，"
+                    "以及后续写文案或生图提示词时最值得补充的细节。"
+                    "只返回 JSON："
+                    '{"summary":"...","keyDetails":["..."],"promptHints":["..."],"images":[{"url":"...","subject":"...","composition":"...","style":"...","colors":"...","keepElements":["..."]}]}'
+                    f"\n当前任务：{focus or '请围绕当前设计任务理解参考图。'}"
+                ),
+            }
+        ]
+        for assetUrl in assetUrls:
+            content.append({"type": "image_url", "image_url": {"url": assetUrl}})
+
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": "你是设计任务里的参考图读图助手。请用简洁准确的中文输出结构化理解结果。",
+            },
+            {
+                "role": "user",
+                "content": content,
+            },
+        ]
+
+        fallback = self._buildImageUnderstandingFallback(assetUrls, focus)
+        try:
+            rawContent = await self.designService.maasClient.createChatCompletion(
+                messages=messages,
+                model=self.settings.qiniuVisionModel,
+                maxTokens=900,
+                temperature=0.2,
+            )
+            parsed = json.loads(self._extractJson(rawContent))
+            return self._normalizeImageUnderstanding(parsed, assetUrls, focus, fallback)
         except Exception:
             return fallback
 
@@ -1095,23 +1219,131 @@ class AgUiAgentService:
         parsedRequest: ParsedAgentRequest,
         copyResult: Any,
         slot: dict[str, str],
+        imageUnderstanding: Any = None,
     ) -> str:
         slotPrompt = str(slot.get("imagePrompt") or "").strip()
+        understandingSummary = self._summarizeImageUnderstanding(imageUnderstanding)
         if slotPrompt:
-            return slotPrompt
+            return self._mergePromptSegments(slotPrompt, understandingSummary)
 
         if isinstance(copyResult, dict):
             title = str(copyResult.get("title") or "").strip()
             summary = str(copyResult.get("summary") or "").strip()
             sectionTitle = str(slot.get("targetSectionTitle") or "").strip()
             if sectionTitle:
-                return f"{title}。围绕“小节 {sectionTitle}”生成一张适合图文排版的配图。{summary}".strip("。")
+                return self._mergePromptSegments(
+                    f"{title}。围绕“小节 {sectionTitle}”生成一张适合图文排版的配图。{summary}".strip("。"),
+                    understandingSummary,
+                )
 
-        return self._buildImagePromptForWeb(parsedRequest, copyResult)
+        return self._buildImagePromptForWeb(parsedRequest, copyResult, imageUnderstanding)
+
+    def _buildDirectImagePrompt(self, parsedRequest: ParsedAgentRequest, imageUnderstanding: Any = None) -> str:
+        return self._mergePromptSegments(
+            parsedRequest.combinedUserContext or parsedRequest.userInput,
+            self._summarizeImageUnderstanding(imageUnderstanding),
+        )
 
     def _buildSectionId(self, heading: str, index: int) -> str:
         normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", heading.lower()).strip("-")
         return normalized or f"section-{index + 1}"
+
+    def _normalizeImageUnderstanding(
+        self,
+        payload: Any,
+        assetUrls: list[str],
+        focus: str,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return fallback
+
+        rawKeyDetails = payload.get("keyDetails")
+        keyDetails = [str(item).strip() for item in rawKeyDetails] if isinstance(rawKeyDetails, list) else []
+        keyDetails = [item for item in keyDetails if item][:8]
+
+        rawPromptHints = payload.get("promptHints")
+        promptHints = [str(item).strip() for item in rawPromptHints] if isinstance(rawPromptHints, list) else []
+        promptHints = [item for item in promptHints if item][:8]
+
+        rawImages = payload.get("images")
+        images: list[dict[str, Any]] = []
+        if isinstance(rawImages, list):
+            for index, item in enumerate(rawImages):
+                if not isinstance(item, dict):
+                    continue
+                rawKeepElements = item.get("keepElements")
+                keepElements = [str(element).strip() for element in rawKeepElements] if isinstance(rawKeepElements, list) else []
+                keepElements = [element for element in keepElements if element][:6]
+                imageUrl = str(item.get("url") or "").strip()
+                if not imageUrl and index < len(assetUrls):
+                    imageUrl = assetUrls[index]
+                images.append(
+                    {
+                        "url": imageUrl,
+                        "subject": str(item.get("subject") or "").strip(),
+                        "composition": str(item.get("composition") or "").strip(),
+                        "style": str(item.get("style") or "").strip(),
+                        "colors": str(item.get("colors") or "").strip(),
+                        "keepElements": keepElements,
+                    }
+                )
+
+        summary = str(payload.get("summary") or "").strip()
+        normalized = {
+            "focus": focus,
+            "summary": summary or fallback["summary"],
+            "keyDetails": keyDetails or fallback["keyDetails"],
+            "promptHints": promptHints or fallback["promptHints"],
+            "images": images or fallback["images"],
+        }
+        return normalized
+
+    def _buildImageUnderstandingFallback(self, assetUrls: list[str], focus: str) -> dict[str, Any]:
+        return {
+            "focus": focus,
+            "summary": "",
+            "keyDetails": [],
+            "promptHints": [],
+            "images": [
+                {
+                    "url": assetUrl,
+                    "subject": "",
+                    "composition": "",
+                    "style": "",
+                    "colors": "",
+                    "keepElements": [],
+                }
+                for assetUrl in assetUrls
+            ],
+        }
+
+    def _summarizeImageUnderstanding(self, imageUnderstanding: Any) -> str:
+        if not isinstance(imageUnderstanding, dict):
+            return ""
+
+        summaryParts: list[str] = []
+        summary = str(imageUnderstanding.get("summary") or "").strip()
+        if summary:
+            summaryParts.append(summary)
+
+        keyDetails = imageUnderstanding.get("keyDetails")
+        if isinstance(keyDetails, list):
+            normalizedDetails = [str(item).strip() for item in keyDetails if str(item).strip()]
+            if normalizedDetails:
+                summaryParts.append("关键信息：" + "；".join(normalizedDetails[:4]))
+
+        promptHints = imageUnderstanding.get("promptHints")
+        if isinstance(promptHints, list):
+            normalizedHints = [str(item).strip() for item in promptHints if str(item).strip()]
+            if normalizedHints:
+                summaryParts.append("提示词补充：" + "；".join(normalizedHints[:4]))
+
+        return "\n".join(summaryParts)
+
+    def _mergePromptSegments(self, *segments: str) -> str:
+        normalizedSegments = [segment.strip("。 \n\t") for segment in segments if segment and segment.strip("。 \n\t")]
+        return "。".join(normalizedSegments)
 
     def _summarizeSearchResults(self, results: Any) -> str:
         if not isinstance(results, list) or not results:
@@ -1144,16 +1376,23 @@ class AgUiAgentService:
 
         return self._mergeUnique(imageUrls)
 
-    def _buildImagePromptForWeb(self, parsedRequest: ParsedAgentRequest, copyResult: Any) -> str:
+    def _buildImagePromptForWeb(self, parsedRequest: ParsedAgentRequest, copyResult: Any, imageUnderstanding: Any = None) -> str:
+        understandingSummary = self._summarizeImageUnderstanding(imageUnderstanding)
         if isinstance(copyResult, dict):
             imagePrompt = str(copyResult.get("heroImagePrompt") or copyResult.get("imagePrompt") or "").strip()
             if imagePrompt:
-                return imagePrompt
+                return self._mergePromptSegments(imagePrompt, understandingSummary)
             title = str(copyResult.get("title") or "").strip()
             summary = str(copyResult.get("summary") or "").strip()
             if title or summary:
-                return f"{title}。{summary}。生成适合中文长图文网页排版的头图或配图，画面清晰，风格统一。".strip("。")
-        return f"{parsedRequest.combinedUserContext or parsedRequest.userInput}。生成适合长图文或公众号排版使用的配图，画面干净，信息表达清楚。".strip("。")
+                return self._mergePromptSegments(
+                    f"{title}。{summary}。生成适合中文长图文网页排版的头图或配图，画面清晰，风格统一。".strip("。"),
+                    understandingSummary,
+                )
+        return self._mergePromptSegments(
+            f"{parsedRequest.combinedUserContext or parsedRequest.userInput}。生成适合长图文或公众号排版使用的配图，画面干净，信息表达清楚。".strip("。"),
+            understandingSummary,
+        )
 
     def _buildWebHtmlFallback(
         self,

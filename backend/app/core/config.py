@@ -32,6 +32,7 @@ class Settings(BaseSettings):
         validation_alias="QINIU_MAAS_BASE_URL",
     )
     qiniuChatModel: str = Field(default="deepseek-v3", validation_alias="QINIU_CHAT_MODEL")
+    qiniuVisionModel: str = Field(default="doubao-seed-2.0-lite", validation_alias="QINIU_VISION_MODEL")
     qiniuImageModel: str = Field(default="kling-v2-1", validation_alias="QINIU_IMAGE_MODEL")
 
     serpApiKey: str = Field(default="", validation_alias="SERPAPI_API_KEY")

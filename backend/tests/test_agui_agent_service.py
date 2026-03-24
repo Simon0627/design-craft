@@ -23,7 +23,6 @@ def testFallbackDecisionChoosesCreateImageForImageRequest() -> None:
     service = createService()
     parsedRequest = ParsedAgentRequest(
         userInput="帮我生成一张香薰机电商主图",
-        assetUrls=["https://example.com/a.png"],
         aspectRatio="1:1",
     )
 
@@ -31,7 +30,52 @@ def testFallbackDecisionChoosesCreateImageForImageRequest() -> None:
 
     assert decision["actionType"] == "tool"
     assert decision["toolName"] == "create_image"
-    assert decision["toolArgs"]["generationMode"] == "image_to_image"
+    assert decision["toolArgs"]["generationMode"] == "text_to_image"
+
+
+def testFallbackDecisionChoosesReadReferenceImagesBeforeImageGeneration() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="基于这张参考图生成一张香薰机电商主图",
+        combinedUserContext="基于这张参考图生成一张香薰机电商主图",
+        assetUrls=["https://example.com/a.png"],
+        aspectRatio="1:1",
+    )
+
+    decision = service._fallbackDecision(
+        parsedRequest,
+        {
+            "latestImageResult": None,
+            "latestImageUnderstanding": None,
+            "latestSearch": None,
+        },
+    )
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "read_reference_images"
+    assert decision["toolArgs"]["assetUrls"] == ["https://example.com/a.png"]
+
+
+def testFallbackDecisionDoesNotReadReferenceImagesWhenPromptIsGeneric() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我生成一张香薰机电商主图",
+        combinedUserContext="帮我生成一张香薰机电商主图",
+        assetUrls=["https://example.com/a.png"],
+        aspectRatio="1:1",
+    )
+
+    decision = service._fallbackDecision(
+        parsedRequest,
+        {
+            "latestImageResult": None,
+            "latestImageUnderstanding": None,
+            "latestSearch": None,
+        },
+    )
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "create_image"
 
 
 def testFallbackDecisionChoosesStoreResultAfterImageCreated() -> None:
@@ -161,6 +205,26 @@ def testUpdateStateFromToolResultAccumulatesImageArtifacts() -> None:
     artifacts = state["imageArtifacts"]
     assert isinstance(artifacts, list)
     assert len(artifacts) == 2
+
+
+def testUpdateStateFromToolResultStoresImageUnderstanding() -> None:
+    service = createService()
+    state: dict[str, object] = {}
+
+    service._updateStateFromToolResult(
+        "read_reference_images",
+        {
+            "summary": "已完成参考图理解。",
+            "keyDetails": ["主体信息", "构图信息"],
+            "promptHints": ["保留关键元素", "补充具体视觉细节"],
+            "images": [{"url": "https://example.com/a.png"}],
+        },
+        state,
+    )
+
+    understanding = state["latestImageUnderstanding"]
+    assert isinstance(understanding, dict)
+    assert understanding["summary"] == "已完成参考图理解。"
 
 
 def testFindNextImageSlotSkipsCoveredSections() -> None:

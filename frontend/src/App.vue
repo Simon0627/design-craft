@@ -115,6 +115,7 @@ const activeAssistantMessageId = ref<string | null>(null);
 const pendingRequestMessages = ref<AgUiMessage[]>([]);
 const followUpCards = reactive<Record<string, FollowUpCardState>>({});
 const pendingToolNames = reactive<Record<string, string>>({});
+const awaitingThinking = ref(false);
 const copiedWebDocumentId = ref("");
 const savingPdfDocumentId = ref("");
 const runSummary = reactive({
@@ -172,6 +173,9 @@ function toolLabel(toolName: string): string {
   if (toolName === "search_content") {
     return "内容搜索";
   }
+  if (toolName === "read_reference_images") {
+    return "参考图理解";
+  }
   if (toolName === "create_copy") {
     return "文案生成";
   }
@@ -185,13 +189,6 @@ function toolLabel(toolName: string): string {
     return "图文排版";
   }
   return toolName || "工具调用";
-}
-
-function stepLabel(stepName: string): string {
-  if (stepName.startsWith("llm_decision_")) {
-    return "深度思考";
-  }
-  return toolLabel(stepName);
 }
 
 function generationModeLabel(mode: unknown): string {
@@ -290,8 +287,10 @@ function canSubmitFollowUp(entryId: string): boolean {
 function shouldDeferToolEntry(toolName: string): boolean {
   return (
     toolName === "ask_followup"
+    || toolName === "read_reference_images"
     || toolName === "create_copy"
     || toolName === "create_image"
+    || toolName === "store_result"
     || toolName === "compose_web"
   );
 }
@@ -323,23 +322,26 @@ function appendAgentDetail(id: string, fragment: string): void {
   target.detail = `${target.detail}${fragment}`;
 }
 
-function findLatestRunningAgent(
-  categories?: AgentFeedEntry["category"][],
-): AgentFeedEntry | undefined {
-  for (let index = feedEntries.value.length - 1; index >= 0; index -= 1) {
-    const entry = feedEntries.value[index];
-    if (!entry || entry.kind !== "agent") {
-      continue;
-    }
-    if (entry.status !== "running") {
-      continue;
-    }
-    if (categories && !categories.includes(entry.category)) {
-      continue;
-    }
-    return entry;
+function finishThinkingEntry(entryId: string | null): void {
+  if (!entryId) {
+    return;
   }
-  return undefined;
+
+  const entry = feedEntries.value.find(
+    (item): item is AgentFeedEntry =>
+      item.kind === "agent" && item.id === entryId,
+  );
+  if (!entry) {
+    return;
+  }
+
+  const detail = entry.detail.trim();
+  const summary = detail ? truncateText(detail, 80) : "这一轮思考已经完成。";
+  updateAgentEntry(entry.id, {
+    status: "completed",
+    summary,
+    detail: detail && detail !== summary ? detail : "",
+  });
 }
 
 function parseJson<T>(rawText: unknown): T | null {
@@ -377,6 +379,15 @@ function describeToolArgs(
     };
   }
 
+  if (toolName === "read_reference_images") {
+    const focus = String(payload.focus ?? "");
+    const assetUrls = Array.isArray(payload.assetUrls) ? payload.assetUrls : [];
+    return {
+      summary: `正在阅读 ${assetUrls.length || 1} 张参考图，补充更具体的视觉细节。`,
+      detail: `理解重点：${focus || "主体、构图、风格、材质和应保留的关键元素"}\n参考图片：${assetUrls.length || 1} 张`,
+    };
+  }
+
   if (toolName === "create_copy") {
     const brief = String(payload.brief ?? "");
     const tone = String(payload.tone ?? "亲切、可信、有设计感");
@@ -384,6 +395,14 @@ function describeToolArgs(
     return {
       summary: `正在整理图文内容结构，预计产出 ${sections} 个内容分节。`,
       detail: `内容方向：${brief || "沿用用户当前需求"}\n文案语气：${tone}`,
+    };
+  }
+
+  if (toolName === "read_reference_images") {
+    const summary = String(payload.summary ?? "").trim();
+    return {
+      summary: summary || "参考图已经理解完成，后续会据此细化提示词。",
+      detail: "",
     };
   }
 
@@ -972,6 +991,9 @@ function handleToolResult(toolCallId: string, content: unknown): void {
     status: timelineEntry.toolName === "ask_followup" ? "running" : "completed",
     summary: description.summary,
     detail: description.detail,
+    collapsed: timelineEntry.toolName === "read_reference_images"
+      ? true
+      : timelineEntry.collapsed,
   });
 
   if (
@@ -1123,6 +1145,7 @@ function resetConversationState(): void {
   activeRunId.value = "";
   activePreviewRoundId.value = "";
   currentThinkingEntryId.value = null;
+  awaitingThinking.value = false;
   activeAssistantMessageId.value = null;
   isRunning.value = false;
   runSummary.status = "待开始";
@@ -1214,39 +1237,20 @@ function handleAgUiEvent(event: AgUiEvent): void {
 
   if (event.type === "STEP_STARTED") {
     const stepName = String(event.stepName ?? "");
-    addAgentEntry({
-      id: createId(`step-${stepName}`),
-      kind: "agent",
-      category: "step",
-      title: stepLabel(stepName),
-      summary: stepName.startsWith("llm_decision_")
-        ? "顶层 LLM 正在判断下一步该用什么工具。"
-        : `${stepLabel(stepName)}已经开始。`,
-      detail: stepName.startsWith("llm_decision_")
-        ? "这一轮会先进行判断，再决定是否搜索、生成图片或转存结果。"
-        : "",
-      status: "running",
-      collapsed: true,
-    });
+    if (stepName.startsWith("llm_decision_")) {
+      awaitingThinking.value = true;
+    }
     return;
   }
 
   if (event.type === "STEP_FINISHED") {
-    const runningStep = findLatestRunningAgent(["step"]);
-    if (runningStep) {
-      updateAgentEntry(runningStep.id, {
-        status: "completed",
-        summary: runningStep.summary || `${runningStep.title}已完成。`,
-      });
-    }
-    currentThinkingEntryId.value = null;
+    awaitingThinking.value = false;
     return;
   }
 
   if (event.type === "TEXT_MESSAGE_START") {
     const messageId = String(event.messageId ?? "");
-    const latestRunningStep = findLatestRunningAgent(["step"]);
-    if (latestRunningStep && latestRunningStep.title.startsWith("深度思考")) {
+    if (awaitingThinking.value) {
       const thinkingId = createId("thinking");
       currentThinkingEntryId.value = thinkingId;
       addAgentEntry({
@@ -1288,19 +1292,9 @@ function handleAgUiEvent(event: AgUiEvent): void {
 
   if (event.type === "TEXT_MESSAGE_END") {
     if (currentThinkingEntryId.value) {
-      const entry = feedEntries.value.find(
-        (item): item is AgentFeedEntry =>
-          item.kind === "agent" && item.id === currentThinkingEntryId.value,
-      );
-      if (entry) {
-        updateAgentEntry(entry.id, {
-          status: "completed",
-          summary: entry.detail
-            ? truncateText(entry.detail, 80)
-            : "这一轮思考已经完成。",
-        });
-      }
+      finishThinkingEntry(currentThinkingEntryId.value);
       currentThinkingEntryId.value = null;
+      awaitingThinking.value = false;
       return;
     }
 
