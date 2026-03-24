@@ -56,15 +56,31 @@ interface PreviewImage {
   url: string;
   title: string;
   source: "stored" | "temporary";
+  originUrl: string;
 }
 
 interface PreviewBatch {
   id: string;
-  runId: string;
-  taskId: string;
+  roundId: string;
   title: string;
   subtitle: string;
   images: PreviewImage[];
+}
+
+interface WebPreviewDocument {
+  id: string;
+  title: string;
+  source: "html" | "url";
+  html?: string;
+  url?: string;
+}
+
+interface WebPreviewBatch {
+  id: string;
+  roundId: string;
+  title: string;
+  subtitle: string;
+  documents: WebPreviewDocument[];
 }
 
 interface FollowUpCardState {
@@ -82,14 +98,18 @@ const defaultPrompt =
 const view = ref<AppView>("home");
 const isRunning = ref(false);
 const promptText = ref(defaultPrompt);
-const aspectRatio = ref("1:1");
+const aspectRatio = ref("");
 const composerAssets = ref<ComposerAsset[]>([]);
 const feedEntries = ref<FeedEntry[]>([]);
 const previewBatches = ref<PreviewBatch[]>([]);
 const selectedPreviewBatchId = ref("");
+const webPreviewBatches = ref<WebPreviewBatch[]>([]);
+const selectedWebPreviewBatchId = ref("");
+const previewMode = ref<"image" | "web">("image");
 const searchResults = ref<SearchResultItem[]>([]);
 const threadId = ref("");
 const activeRunId = ref("");
+const activePreviewRoundId = ref("");
 const currentThinkingEntryId = ref<string | null>(null);
 const activeAssistantMessageId = ref<string | null>(null);
 const pendingRequestMessages = ref<AgUiMessage[]>([]);
@@ -112,7 +132,13 @@ const currentPreviewBatch = computed(() =>
     || previewBatches.value[0]
     || null,
 );
+const currentWebPreviewBatch = computed(() =>
+  webPreviewBatches.value.find((batch) => batch.id === selectedWebPreviewBatchId.value)
+    || webPreviewBatches.value[0]
+    || null,
+);
 const visiblePreviewImages = computed(() => currentPreviewBatch.value?.images ?? []);
+const visibleWebDocuments = computed(() => currentWebPreviewBatch.value?.documents ?? []);
 const canSubmitPrompt = computed(() => Boolean(promptText.value.trim()));
 
 function createId(prefix: string): string {
@@ -139,11 +165,17 @@ function toolLabel(toolName: string): string {
   if (toolName === "search_content") {
     return "内容搜索";
   }
+  if (toolName === "create_copy") {
+    return "文案生成";
+  }
   if (toolName === "create_image") {
     return "图片创作";
   }
   if (toolName === "store_result") {
     return "结果存储";
+  }
+  if (toolName === "compose_web") {
+    return "图文排版";
   }
   return toolName || "工具调用";
 }
@@ -249,7 +281,12 @@ function canSubmitFollowUp(entryId: string): boolean {
 }
 
 function shouldDeferToolEntry(toolName: string): boolean {
-  return toolName === "ask_followup" || toolName === "create_image";
+  return (
+    toolName === "ask_followup"
+    || toolName === "create_copy"
+    || toolName === "create_image"
+    || toolName === "compose_web"
+  );
 }
 
 function addAgentEntry(entry: AgentFeedEntry): string {
@@ -333,6 +370,16 @@ function describeToolArgs(
     };
   }
 
+  if (toolName === "create_copy") {
+    const brief = String(payload.brief ?? "");
+    const tone = String(payload.tone ?? "亲切、可信、有设计感");
+    const sections = Number(payload.sections ?? 4);
+    return {
+      summary: `正在整理图文内容结构，预计产出 ${sections} 个内容分节。`,
+      detail: `内容方向：${brief || "沿用用户当前需求"}\n文案语气：${tone}`,
+    };
+  }
+
   if (toolName === "ask_followup") {
     const question = String(payload.question ?? "");
     const options = Array.isArray(payload.options) ? payload.options : [];
@@ -346,7 +393,7 @@ function describeToolArgs(
     const prompt = String(payload.prompt ?? "");
     const imageCount = Number(payload.imageCount ?? 1);
     const assetUrls = Array.isArray(payload.assetUrls) ? payload.assetUrls : [];
-    const aspect = String(payload.aspectRatio ?? aspectRatio.value);
+    const aspect = String(payload.aspectRatio ?? aspectRatio.value ?? "由 Agent 自行判断");
     const generationMode = generationModeLabel(payload.generationMode);
     return {
       summary: `${generationMode}进行中，预计输出 ${imageCount} 张 ${aspect} 图片。`,
@@ -362,6 +409,16 @@ function describeToolArgs(
     return {
       summary: `准备把 ${resultUrls.length || 1} 张生成结果转存到七牛空间。`,
       detail: `任务 ID：${String(payload.taskId ?? "未提供")}\n存储目录：${outputKeyPrefix}`,
+    };
+  }
+
+  if (toolName === "compose_web") {
+    const title = String(payload.title ?? "图文内容");
+    const layoutStyle = String(payload.layoutStyle ?? "公众号长图文");
+    const imageUrls = Array.isArray(payload.imageUrls) ? payload.imageUrls : [];
+    return {
+      summary: `正在把文案和图片排成 ${layoutStyle}。`,
+      detail: `页面标题：${title}\n参与排版的图片：${imageUrls.length} 张`,
     };
   }
 
@@ -420,6 +477,22 @@ function describeToolResult(
     };
   }
 
+  if (toolName === "create_copy") {
+    const sections = Array.isArray(payload.sections)
+      ? payload.sections as Array<Record<string, unknown>>
+      : [];
+    return {
+      summary: `文案结构已经整理好了，共 ${sections.length} 个内容分节。`,
+      detail:
+        sections.length === 0
+          ? String(payload.summary ?? "已经拿到一版图文内容结构。")
+          : sections
+              .slice(0, 3)
+              .map((item, index) => `${index + 1}. ${String(item.heading ?? "内容小节")}`)
+              .join("\n"),
+    };
+  }
+
   if (toolName === "create_image") {
     const taskId = String(payload.taskId ?? "");
     const resultUrls = Array.isArray(payload.resultUrls)
@@ -454,6 +527,15 @@ function describeToolResult(
     };
   }
 
+  if (toolName === "compose_web") {
+    const title = String(payload.title ?? "图文内容");
+    const summary = String(payload.summary ?? "图文页面已经排版完成。");
+    return {
+      summary: "图文页面已经排版完成，右侧浏览区已同步更新。",
+      detail: `页面标题：${title}\n${summary}`,
+    };
+  }
+
   return {
     summary: "工具已经返回结果。",
     detail: rawText,
@@ -464,9 +546,20 @@ function buildPreviewBatchTitle(index: number): string {
   return `第 ${index + 1} 轮结果`;
 }
 
-function buildPreviewBatchSubtitle(imagesCount: number, source: "stored" | "temporary"): string {
-  const sourceText = source === "stored" ? "已转存" : "临时结果";
-  return `${imagesCount} 张图片 · ${sourceText}`;
+function buildPreviewBatchSubtitle(images: PreviewImage[]): string {
+  const storedCount = images.filter((image) => image.source === "stored").length;
+  if (storedCount === images.length) {
+    return `${images.length} 张图片 · 已转存`;
+  }
+  if (storedCount === 0) {
+    return `${images.length} 张图片 · 临时结果`;
+  }
+  return `${images.length} 张图片 · 部分已转存`;
+}
+
+function buildWebBatchSubtitle(documentsCount: number, source: "html" | "url"): string {
+  const sourceText = source === "html" ? "即时预览" : "网页链接";
+  return `${documentsCount} 个页面 · ${sourceText}`;
 }
 
 function extractFileName(path: string): string {
@@ -479,8 +572,173 @@ function extractFileName(path: string): string {
   return segments[segments.length - 1] || normalized;
 }
 
-function setPreviewImages(result: ImageToolResult, runId: string): void {
-  const nextImages: PreviewImage[] = [];
+function isLikelyUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeHtml(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (/^<!doctype html/i.test(normalized) || /<html[\s>]/i.test(normalized)) {
+    return true;
+  }
+
+  const htmlTagCount = (normalized.match(/<(div|section|article|header|footer|main|style|body|img|p|h1|h2|h3)\b/gi) || []).length;
+  return htmlTagCount >= 2 && normalized.includes("</");
+}
+
+function extractHtmlFromText(value: string): string | null {
+  const fencedMatch = value.match(/```(?:html)?\s*([\s\S]*?)```/i);
+  if (fencedMatch && looksLikeHtml(fencedMatch[1] || "")) {
+    return fencedMatch[1]!.trim();
+  }
+
+  if (looksLikeHtml(value)) {
+    return value.trim();
+  }
+
+  return null;
+}
+
+function buildWebPreviewTitle(document: WebPreviewDocument, index: number): string {
+  if (document.title.trim()) {
+    return document.title.trim();
+  }
+  if (document.url) {
+    return extractFileName(new URL(document.url).pathname) || `页面 ${index + 1}`;
+  }
+  return `页面 ${index + 1}`;
+}
+
+function normalizeWebPreviewDocument(
+  document: Partial<WebPreviewDocument>,
+  index: number,
+): WebPreviewDocument | null {
+  const html = typeof document.html === "string" ? document.html.trim() : "";
+  const url = typeof document.url === "string" ? document.url.trim() : "";
+  if (!html && !url) {
+    return null;
+  }
+
+  return {
+    id: createId("web-doc"),
+    title: buildWebPreviewTitle(
+      {
+        id: "",
+        title: typeof document.title === "string" ? document.title : "",
+        source: html ? "html" : "url",
+        html,
+        url,
+      },
+      index,
+    ),
+    source: html ? "html" : "url",
+    html: html || undefined,
+    url: url || undefined,
+  };
+}
+
+function getActivePreviewRoundId(): string {
+  return activePreviewRoundId.value || activeRunId.value || threadId.value || createId("preview-round");
+}
+
+function collectWebPreviewDocuments(payload: unknown): WebPreviewDocument[] {
+  const documents: WebPreviewDocument[] = [];
+
+  function visit(value: unknown, depth = 0): void {
+    if (depth > 3) {
+      return;
+    }
+
+    if (typeof value === "string") {
+      const html = extractHtmlFromText(value);
+      if (html) {
+        const document = normalizeWebPreviewDocument({ html }, documents.length);
+        if (document) {
+          documents.push(document);
+        }
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    const htmlCandidates = [
+      record.html,
+      record.htmlContent,
+      record.srcdoc,
+      record.markup,
+    ];
+    for (const candidate of htmlCandidates) {
+      if (typeof candidate !== "string") {
+        continue;
+      }
+      const html = extractHtmlFromText(candidate);
+      if (!html) {
+        continue;
+      }
+      const document = normalizeWebPreviewDocument(
+        {
+          title: typeof record.title === "string" ? record.title : "",
+          html,
+          url: typeof record.url === "string" && isLikelyUrl(record.url) ? record.url : "",
+        },
+        documents.length,
+      );
+      if (document) {
+        documents.push(document);
+      }
+      return;
+    }
+
+    const urlCandidates = [record.webUrl, record.previewUrl, record.url];
+    for (const candidate of urlCandidates) {
+      if (typeof candidate !== "string" || !isLikelyUrl(candidate)) {
+        continue;
+      }
+      if (!/\.html?($|\?)/i.test(candidate) && typeof record.html !== "string" && typeof record.htmlContent !== "string") {
+        continue;
+      }
+      const document = normalizeWebPreviewDocument(
+        {
+          title: typeof record.title === "string" ? record.title : "",
+          url: candidate,
+        },
+        documents.length,
+      );
+      if (document) {
+        documents.push(document);
+      }
+      return;
+    }
+
+    for (const nestedValue of Object.values(record)) {
+      visit(nestedValue, depth + 1);
+    }
+  }
+
+  visit(payload);
+  return documents;
+}
+
+function setPreviewImages(result: ImageToolResult, roundId: string): void {
+  const incomingImages: PreviewImage[] = [];
   const storedResults = Array.isArray(result.storedResults)
     ? result.storedResults
     : [];
@@ -490,53 +748,57 @@ function setPreviewImages(result: ImageToolResult, runId: string): void {
 
   for (const item of storedResults) {
     const stored = item as StoredResult;
-    nextImages.push({
+    incomingImages.push({
       id: createId("stored"),
       url: stored.url,
       title: extractFileName(stored.key),
       source: "stored",
+      originUrl: stored.sourceUrl || stored.url,
     });
   }
 
-  if (nextImages.length === 0) {
+  if (incomingImages.length === 0) {
     for (const url of temporaryResults) {
-      nextImages.push({
+      incomingImages.push({
         id: createId("temp"),
         url,
         title: "临时生成结果",
         source: "temporary",
+        originUrl: url,
       });
     }
   }
 
-  if (nextImages.length > 0) {
-    const batchTaskId = String(result.taskId ?? "");
-    const existingIndex = previewBatches.value.findIndex(
-      (batch) =>
-        (batchTaskId && batch.taskId === batchTaskId) ||
-        (!batchTaskId && batch.runId === runId),
-    );
-    const nextSource = nextImages[0]?.source ?? "temporary";
-
+  if (incomingImages.length > 0) {
+    const existingIndex = previewBatches.value.findIndex((batch) => batch.roundId === roundId);
     if (existingIndex >= 0) {
       const existing = previewBatches.value[existingIndex];
       if (!existing) {
         return;
       }
-      existing.images = nextImages;
-      existing.subtitle = buildPreviewBatchSubtitle(nextImages.length, nextSource);
-      if (batchTaskId) {
-        existing.taskId = batchTaskId;
+
+      const mergedImages = [...existing.images];
+      for (const image of incomingImages) {
+        const matchedIndex = mergedImages.findIndex(
+          (existingImage) => existingImage.originUrl === image.originUrl,
+        );
+        if (matchedIndex >= 0) {
+          mergedImages[matchedIndex] = image;
+        } else {
+          mergedImages.push(image);
+        }
       }
+
+      existing.images = mergedImages;
+      existing.subtitle = buildPreviewBatchSubtitle(mergedImages);
       selectedPreviewBatchId.value = existing.id;
     } else {
       const nextBatch: PreviewBatch = {
         id: createId("preview-batch"),
-        runId,
-        taskId: batchTaskId,
+        roundId,
         title: buildPreviewBatchTitle(previewBatches.value.length),
-        subtitle: buildPreviewBatchSubtitle(nextImages.length, nextSource),
-        images: nextImages,
+        subtitle: buildPreviewBatchSubtitle(incomingImages),
+        images: incomingImages,
       };
       previewBatches.value.push(nextBatch);
       selectedPreviewBatchId.value = nextBatch.id;
@@ -546,6 +808,28 @@ function setPreviewImages(result: ImageToolResult, runId: string): void {
   if (result.taskId) {
     runSummary.latestTaskId = result.taskId;
   }
+  if (incomingImages.length > 0) {
+    previewMode.value = "image";
+  }
+}
+
+function setWebPreviewDocuments(documents: WebPreviewDocument[], roundId: string): void {
+  if (documents.length === 0) {
+    return;
+  }
+
+  const nextSource = documents[0]?.source ?? "html";
+  const nextBatch: WebPreviewBatch = {
+    id: createId("web-preview-batch"),
+    roundId,
+    title: "最终 Web 结果",
+    subtitle: buildWebBatchSubtitle(documents.length, nextSource),
+    documents,
+  };
+  webPreviewBatches.value = [nextBatch];
+  selectedWebPreviewBatchId.value = nextBatch.id;
+
+  previewMode.value = "web";
 }
 
 function handleToolResult(toolCallId: string, content: unknown): void {
@@ -584,7 +868,14 @@ function handleToolResult(toolCallId: string, content: unknown): void {
       timelineEntry.toolName === "store_result") &&
     parsed
   ) {
-    setPreviewImages(parsed as ImageToolResult, activeRunId.value);
+    setPreviewImages(parsed as ImageToolResult, getActivePreviewRoundId());
+  }
+
+  if (parsed) {
+    const webDocuments = collectWebPreviewDocuments(parsed);
+    if (webDocuments.length > 0) {
+      setWebPreviewDocuments(webDocuments, getActivePreviewRoundId());
+    }
   }
 
   if (timelineEntry.toolName === "ask_followup" && parsed) {
@@ -616,11 +907,16 @@ function handleStateSnapshot(snapshot: unknown): void {
     | undefined;
 
   if (latestImageResult) {
-    setPreviewImages(latestImageResult, activeRunId.value);
+    setPreviewImages(latestImageResult, getActivePreviewRoundId());
   }
 
   if (latestSearch && Array.isArray(latestSearch.results)) {
     searchResults.value = latestSearch.results as SearchResultItem[];
+  }
+
+  const webDocuments = collectWebPreviewDocuments(state);
+  if (webDocuments.length > 0) {
+    setWebPreviewDocuments(webDocuments, getActivePreviewRoundId());
   }
 }
 
@@ -693,6 +989,9 @@ function resetConversationState(): void {
   feedEntries.value = [];
   previewBatches.value = [];
   selectedPreviewBatchId.value = "";
+  webPreviewBatches.value = [];
+  selectedWebPreviewBatchId.value = "";
+  previewMode.value = "image";
   searchResults.value = [];
   for (const key of Object.keys(followUpCards)) {
     delete followUpCards[key];
@@ -703,6 +1002,7 @@ function resetConversationState(): void {
   pendingRequestMessages.value = [];
   threadId.value = "";
   activeRunId.value = "";
+  activePreviewRoundId.value = "";
   currentThinkingEntryId.value = null;
   activeAssistantMessageId.value = null;
   isRunning.value = false;
@@ -715,6 +1015,7 @@ function startNewConversation(): void {
   resetConversationState();
   view.value = "home";
   promptText.value = defaultPrompt;
+  aspectRatio.value = "";
 }
 
 function handleFilesSelected(fileList: FileList | null): void {
@@ -891,6 +1192,13 @@ function handleAgUiEvent(event: AgUiEvent): void {
       );
       if (messageEntry) {
         ensureAssistantContextMessage(messageEntry.id, messageEntry.content);
+        const html = extractHtmlFromText(messageEntry.content);
+        if (html) {
+          const document = normalizeWebPreviewDocument({ html }, 0);
+          if (document) {
+            setWebPreviewDocuments([document], getActivePreviewRoundId());
+          }
+        }
       }
     }
     activeAssistantMessageId.value = null;
@@ -1016,7 +1324,10 @@ async function runAgent(userInput: string, addToFeed: boolean = true): Promise<v
   const userMessageId = createId("user");
 
   if (addToFeed) {
+    activePreviewRoundId.value = createId("preview-round");
     addMessageEntry("user", normalizedInput, userMessageId);
+  } else if (!activePreviewRoundId.value) {
+    activePreviewRoundId.value = createId("preview-round");
   }
   pendingRequestMessages.value.push({
     id: userMessageId,
@@ -1028,19 +1339,20 @@ async function runAgent(userInput: string, addToFeed: boolean = true): Promise<v
   runSummary.status = "等待 Agent 响应";
   isRunning.value = true;
   activeAbortController = new AbortController();
+  const nextAspectRatio = aspectRatio.value.trim();
 
   const payload: RunAgentPayload = {
     threadId: threadId.value,
     runId: activeRunId.value,
     messages: pendingRequestMessages.value,
     state: {
-      aspectRatio: aspectRatio.value,
+      ...(nextAspectRatio ? { aspectRatio: nextAspectRatio } : {}),
       assetUrls: uploadedUrls,
     },
     tools: [],
     context: [],
     forwardedProps: {
-      aspectRatio: aspectRatio.value,
+      ...(nextAspectRatio ? { aspectRatio: nextAspectRatio } : {}),
       assetUrls: uploadedUrls,
       imageCount: 1,
       autoStoreResult: true,
@@ -1060,10 +1372,14 @@ async function runAgent(userInput: string, addToFeed: boolean = true): Promise<v
 }
 
 async function handleSubmit(): Promise<void> {
+  const nextPrompt = promptText.value;
+  promptText.value = "";
   try {
-    await runAgent(promptText.value);
-    promptText.value = "";
+    await runAgent(nextPrompt);
   } catch (error) {
+    if (!promptText.value.trim()) {
+      promptText.value = nextPrompt;
+    }
     const message = error instanceof Error ? error.message : "调用 AG-UI 失败";
     runSummary.status = "失败";
     runSummary.errorMessage = message;
@@ -1133,6 +1449,13 @@ onBeforeUnmount(() => {
 
           <div class="ratio-group">
             <button
+              :class="['ratio-pill', { active: !aspectRatio }]"
+              type="button"
+              @click="aspectRatio = ''"
+            >
+              由 Agent 决定
+            </button>
+            <button
               v-for="option in aspectRatioOptions"
               :key="option"
               :class="['ratio-pill', { active: option === aspectRatio }]"
@@ -1196,7 +1519,7 @@ onBeforeUnmount(() => {
         <div class="sender-footer">
           <div>
             <strong>当前输出比例：</strong>
-            <span>{{ aspectRatio }}</span>
+            <span>{{ aspectRatio || "由 Agent 自行判断" }}</span>
           </div>
 
           <button
@@ -1330,7 +1653,7 @@ onBeforeUnmount(() => {
             v-model="promptText"
             class="prompt-textarea compact"
             placeholder="继续追问，或者换一个提示词重新生成。"
-            rows="4"
+            rows="3"
           />
 
           <div class="sender-footer conversation-actions">
@@ -1349,6 +1672,9 @@ onBeforeUnmount(() => {
             <label class="ratio-select">
               <span>图片比例</span>
               <select v-model="aspectRatio" class="ratio-select-input">
+                <option value="">
+                  由 Agent 决定
+                </option>
                 <option v-for="option in aspectRatioOptions" :key="option" :value="option">
                   {{ option }}
                 </option>
@@ -1370,10 +1696,41 @@ onBeforeUnmount(() => {
         <section class="preview-card">
           <header class="card-header">
             <h3>结果预览</h3>
-            <span>{{ visiblePreviewImages.length }} 张图片</span>
+            <span>
+              {{
+                previewMode === "web"
+                  ? `${visibleWebDocuments.length} 个页面`
+                  : `${visiblePreviewImages.length} 张图片`
+              }}
+            </span>
           </header>
 
-          <div v-if="previewBatches.length > 0" class="preview-history">
+          <div
+            v-if="previewBatches.length > 0 || webPreviewBatches.length > 0"
+            class="preview-mode-switch"
+          >
+            <button
+              v-if="previewBatches.length > 0"
+              :class="['mode-pill', { active: previewMode === 'image' }]"
+              type="button"
+              @click="previewMode = 'image'"
+            >
+              图片结果
+            </button>
+            <button
+              v-if="webPreviewBatches.length > 0"
+              :class="['mode-pill', { active: previewMode === 'web' }]"
+              type="button"
+              @click="previewMode = 'web'"
+            >
+              Web 内容
+            </button>
+          </div>
+
+          <div
+            v-if="previewMode === 'image' && previewBatches.length > 0"
+            class="preview-history"
+          >
             <button
               v-for="batch in [...previewBatches].reverse()"
               :key="batch.id"
@@ -1386,12 +1743,17 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div v-if="currentPreviewBatch" class="preview-batch-meta">
+          <div v-if="previewMode === 'image' && currentPreviewBatch" class="preview-batch-meta">
             <strong>{{ currentPreviewBatch.title }}</strong>
             <span>{{ currentPreviewBatch.subtitle }}</span>
           </div>
 
-          <div v-if="visiblePreviewImages.length > 0" class="preview-grid">
+          <div v-if="previewMode === 'web' && currentWebPreviewBatch" class="preview-batch-meta">
+            <strong>{{ currentWebPreviewBatch.title }}</strong>
+            <span>{{ currentWebPreviewBatch.subtitle }}</span>
+          </div>
+
+          <div v-if="previewMode === 'image' && visiblePreviewImages.length > 0" class="preview-grid">
             <a
               v-for="image in visiblePreviewImages"
               :key="image.id"
@@ -1409,8 +1771,49 @@ onBeforeUnmount(() => {
               </div>
             </a>
           </div>
+
+          <div v-else-if="previewMode === 'web' && visibleWebDocuments.length > 0" class="web-preview-list">
+            <article
+              v-for="document in visibleWebDocuments"
+              :key="document.id"
+              class="web-preview-item"
+            >
+              <div class="web-preview-toolbar">
+                <div class="web-preview-meta">
+                  <strong>{{ document.title }}</strong>
+                  <span>{{ document.source === "html" ? "即时预览" : "网页链接" }}</span>
+                </div>
+                <a
+                  v-if="document.url"
+                  :href="document.url"
+                  class="web-preview-link"
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  新窗口打开
+                </a>
+              </div>
+              <iframe
+                v-if="document.html"
+                :srcdoc="document.html"
+                class="web-preview-frame"
+                sandbox="allow-scripts allow-same-origin"
+              />
+              <iframe
+                v-else-if="document.url"
+                :src="document.url"
+                class="web-preview-frame"
+                sandbox="allow-scripts allow-same-origin"
+              />
+            </article>
+          </div>
+
           <p v-else class="empty-text">
-            当图片生成或转存完成后，这里会自动出现预览。
+            {{
+              previewMode === "web"
+                ? "当 Agent 返回网页排版内容后，这里会自动出现可浏览的预览。"
+                : "当图片生成或转存完成后，这里会自动出现预览。"
+            }}
           </p>
         </section>
 

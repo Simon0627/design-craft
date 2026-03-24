@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,10 @@ class KodoClient:
 
         return StoredObject(key=key, url=self.buildAccessibleUrl(key), sourceUrl=remoteUrl)
 
+    async def mirrorRemoteFiles(self, items: list[tuple[str, str]]) -> list[StoredObject]:
+        tasks = [self.mirrorRemoteFile(remoteUrl, key) for remoteUrl, key in items]
+        return await asyncio.gather(*tasks)
+
     async def uploadBytes(
         self,
         content: bytes,
@@ -142,11 +147,28 @@ class KodoClient:
             url=self.buildAccessibleUrl(key),
         )
 
-    def buildResultKey(self, taskId: str, index: int, sourceUrl: str, prefix: str = "generated") -> str:
+    def buildResultKey(
+        self,
+        taskId: str,
+        index: int,
+        sourceUrl: str,
+        prefix: str = "generated",
+        assetName: str = "",
+        sectionId: str = "",
+    ) -> str:
         parsedUrl = urlparse(sourceUrl)
         suffix = Path(parsedUrl.path).suffix or ".png"
         safePrefix = prefix.strip("/ ") or "generated"
-        return f"{safePrefix}/{taskId}/{index}{suffix}"
+        safeSection = self._normalizeKeySegment(sectionId)
+        safeName = self._normalizeKeySegment(assetName)
+        fileName = safeName or str(index)
+        if safeSection:
+            return f"{safePrefix}/{taskId}/{safeSection}/{fileName}{suffix}"
+        return f"{safePrefix}/{taskId}/{fileName}{suffix}"
+
+    def _normalizeKeySegment(self, value: str) -> str:
+        normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", value.strip()).strip("-")
+        return normalized[:64]
 
     def ensureUploadConfigured(self) -> None:
         if not self.settings.qiniuAccessKey or not self.settings.qiniuSecretKey:

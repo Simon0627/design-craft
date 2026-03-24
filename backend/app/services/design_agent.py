@@ -248,12 +248,68 @@ class DesignAgentService:
         taskId: str,
         resultUrls: list[str],
         outputKeyPrefix: str = "generated",
+        assetName: str = "",
+        targetSectionId: str = "",
     ) -> list[StoredObject]:
-        storedResults: list[StoredObject] = []
+        uploadItems: list[tuple[str, str]] = []
         for index, url in enumerate(resultUrls):
-            objectKey = self.kodoClient.buildResultKey(taskId, index, url, outputKeyPrefix)
-            storedResults.append(await self.kodoClient.mirrorRemoteFile(url, objectKey))
-        return storedResults
+            objectKey = self.kodoClient.buildResultKey(
+                taskId,
+                index,
+                url,
+                outputKeyPrefix,
+                assetName=assetName,
+                sectionId=targetSectionId,
+            )
+            uploadItems.append((url, objectKey))
+        return await self.kodoClient.mirrorRemoteFiles(uploadItems)
+
+    async def storeGeneratedArtifactBatch(
+        self,
+        artifacts: list[dict[str, Any]],
+        outputKeyPrefix: str = "generated",
+    ) -> list[dict[str, Any]]:
+        uploadItems: list[tuple[str, str]] = []
+        uploadMappings: list[tuple[int, str]] = []
+        storedArtifacts: list[dict[str, Any]] = []
+        for artifactIndex, artifact in enumerate(artifacts):
+            taskId = str(artifact.get("taskId") or "")
+            resultUrls = [str(item) for item in artifact.get("resultUrls", []) if item]
+            if not taskId or not resultUrls:
+                continue
+            storedArtifacts.append(
+                {
+                    "artifactId": str(artifact.get("artifactId") or ""),
+                    "taskId": taskId,
+                    "assetName": str(artifact.get("assetName") or ""),
+                    "targetSectionId": str(artifact.get("targetSectionId") or ""),
+                    "targetSectionTitle": str(artifact.get("targetSectionTitle") or ""),
+                    "storedResults": [],
+                }
+            )
+            for imageIndex, resultUrl in enumerate(resultUrls):
+                objectKey = self.kodoClient.buildResultKey(
+                    taskId,
+                    imageIndex,
+                    resultUrl,
+                    outputKeyPrefix,
+                    assetName=str(artifact.get("assetName") or ""),
+                    sectionId=str(artifact.get("targetSectionId") or ""),
+                )
+                uploadItems.append((resultUrl, objectKey))
+                uploadMappings.append((len(storedArtifacts) - 1, taskId))
+
+        if not uploadItems:
+            return storedArtifacts
+
+        uploadedObjects = await self.kodoClient.mirrorRemoteFiles(uploadItems)
+        for storedObject, mapping in zip(uploadedObjects, uploadMappings):
+            artifactIndex, taskId = mapping
+            artifact = storedArtifacts[artifactIndex]
+            if artifact.get("taskId") != taskId:
+                continue
+            artifact["storedResults"].append(storedObject.model_dump())
+        return storedArtifacts
 
     def _parsePlan(
         self,

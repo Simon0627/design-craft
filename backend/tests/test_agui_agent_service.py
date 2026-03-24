@@ -72,6 +72,121 @@ def testFallbackDecisionChoosesAskFollowUpForVagueImageRequest() -> None:
     assert len(decision["toolArgs"]["options"]) >= 2
 
 
+def testFallbackDecisionChoosesCreateCopyForWebRequest() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我做一篇香薰机微信公众号长图文",
+        combinedUserContext="帮我做一篇香薰机微信公众号长图文",
+    )
+
+    decision = service._fallbackDecision(
+        parsedRequest,
+        {"latestImageResult": None, "latestSearch": None, "latestCopyResult": None, "latestWebResult": None},
+    )
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "create_copy"
+
+
+def testFallbackDecisionChoosesComposeWebWhenCopyAndImagesReady() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我做一篇香薰机微信公众号长图文",
+        combinedUserContext="帮我做一篇香薰机微信公众号长图文",
+    )
+
+    decision = service._fallbackDecision(
+        parsedRequest,
+        {
+            "latestSearch": None,
+            "latestCopyResult": {
+                "title": "香薰机春日图文",
+                "sections": [{"sectionId": "highlight", "heading": "亮点", "body": "内容", "imagePrompt": "提示词"}],
+            },
+            "imageArtifacts": [
+                {
+                    "artifactId": "section::highlight",
+                    "taskId": "task-1",
+                    "assetName": "亮点配图",
+                    "targetSectionId": "highlight",
+                    "targetSectionTitle": "亮点",
+                    "status": "succeed",
+                    "storedResults": [{"url": "https://example.com/1.png"}],
+                    "resultUrls": [],
+                }
+            ],
+            "latestImageResult": None,
+            "latestWebResult": None,
+        },
+    )
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "compose_web"
+    assert decision["toolArgs"]["imageAssets"][0]["targetSectionId"] == "highlight"
+
+
+def testUpdateStateFromToolResultAccumulatesImageArtifacts() -> None:
+    service = createService()
+    state: dict[str, object] = {"imageArtifacts": []}
+
+    service._updateStateFromToolResult(
+        "create_image",
+        {
+            "artifactId": "section::highlight",
+            "taskId": "task-1",
+            "assetName": "亮点配图",
+            "targetSectionId": "highlight",
+            "targetSectionTitle": "亮点",
+            "status": "succeed",
+            "resultUrls": ["https://example.com/1-temp.png"],
+            "storedResults": [],
+        },
+        state,
+    )
+    service._updateStateFromToolResult(
+        "create_image",
+        {
+            "artifactId": "section::detail",
+            "taskId": "task-2",
+            "assetName": "细节配图",
+            "targetSectionId": "detail",
+            "targetSectionTitle": "细节",
+            "status": "succeed",
+            "resultUrls": ["https://example.com/2-temp.png"],
+            "storedResults": [],
+        },
+        state,
+    )
+
+    artifacts = state["imageArtifacts"]
+    assert isinstance(artifacts, list)
+    assert len(artifacts) == 2
+
+
+def testFindNextImageSlotSkipsCoveredSections() -> None:
+    service = createService()
+
+    slot = service._findNextImageSlot(
+        {
+            "sections": [
+                {"sectionId": "highlight", "heading": "亮点", "body": "内容", "imagePrompt": "图一"},
+                {"sectionId": "detail", "heading": "细节", "body": "内容", "imagePrompt": "图二"},
+            ]
+        },
+        [
+            {
+                "artifactId": "section::highlight",
+                "targetSectionId": "highlight",
+                "storedResults": [{"url": "https://example.com/1.png"}],
+                "resultUrls": [],
+            }
+        ],
+    )
+
+    assert slot is not None
+    assert slot["targetSectionId"] == "detail"
+
+
 def testSanitizeFinalResponseRemovesLinks() -> None:
     service = createService()
 
@@ -83,3 +198,13 @@ def testSanitizeFinalResponseRemovesLinks() -> None:
     assert "http" not in result
     assert "点击查看" not in result
     assert result == "图片已经生成好了，可以继续告诉我你想怎么调整。"
+
+
+def testFallbackFinalResponseForWebResult() -> None:
+    service = createService()
+
+    result = service._fallbackFinalResponse(
+        {"latestWebResult": {"html": "<!doctype html><html></html>"}},
+    )
+
+    assert result == "图文内容已经排版好了，你可以继续告诉我想怎么调整。"

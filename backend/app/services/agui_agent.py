@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 import json
 import re
 import uuid
@@ -23,7 +24,7 @@ class AgUiAgentService:
         self.settings = settings
         self.designService = designService
         self.searchService = searchService
-        self.maxToolIterations = 6
+        self.maxToolIterations = 10
 
     async def run(self, agentInput: RunAgentInput) -> AsyncIterator[dict[str, Any]]:
         threadId = agentInput.threadId
@@ -35,7 +36,10 @@ class AgUiAgentService:
             "phase": "started",
             "toolCalls": [],
             "latestSearch": None,
+            "latestCopyResult": None,
             "latestImageResult": None,
+            "imageArtifacts": [],
+            "latestWebResult": None,
             "finalResponse": None,
             "pendingFollowUp": None,
         }
@@ -123,23 +127,49 @@ class AgUiAgentService:
                 },
             },
             {
+                "name": "create_copy",
+                "description": "当你需要先产出长图文、公众号、H5 页面所需的文案结构、段落内容、分节标题时使用。",
+                "args": {
+                    "brief": "string，可选，想重点强调的内容方向",
+                    "tone": "string，可选，文案语气",
+                    "sections": "integer，可选，期望分成几段，默认 4",
+                },
+            },
+            {
                 "name": "create_image",
-                "description": "当用户需要产出图片时使用。你需要给出最终生图 prompt，可选 aspectRatio、assetUrls、generationMode、imageCount。",
+                "description": "当用户需要产出图片时使用。你需要给出最终生图 prompt，并尽量说明这张图是给哪一段内容用的。",
                 "args": {
                     "prompt": "string，最终生图提示词",
-                    "aspectRatio": "string，可选",
+                    "aspectRatio": "string，枚举值：16:9、9:16、1:1、4:3、3:4、3:2、2:3、21:9",
                     "assetUrls": "string[]，可选",
                     "generationMode": "text_to_image | image_to_image | multi_image_edit，可选",
                     "imageCount": "integer，可选",
+                    "assetName": "string，可选，这张图的名字，比如头图、卖点配图 1",
+                    "targetSectionId": "string，可选，这张图对应的 sectionId",
+                    "targetSectionTitle": "string，可选，这张图对应的小节标题",
                 },
             },
             {
                 "name": "store_result",
-                "description": "当 create_image 已经生成出临时图片，需要转存到七牛空间交付时使用。",
+                "description": "当 create_image 已经生成出临时图片，需要批量转存到七牛空间交付时使用。",
                 "args": {
                     "taskId": "string，create_image 返回的 taskId",
                     "resultUrls": "string[]，create_image 返回的临时结果 URL",
                     "outputKeyPrefix": "string，可选",
+                    "assetName": "string，可选，对应的图片名字",
+                    "targetSectionId": "string，可选，对应的 sectionId",
+                    "targetSectionTitle": "string，可选，对应的小节标题",
+                    "artifacts": "object[]，可选，批量待转存图片",
+                },
+            },
+            {
+                "name": "compose_web",
+                "description": "当你已经拿到文案和图片素材，需要生成可浏览、可预览的图文网页时使用。优先使用 state.imageArtifacts 里累计好的素材，而不是只看最后一张图。",
+                "args": {
+                    "title": "string，可选，网页标题",
+                    "layoutStyle": "string，可选，如公众号长图文、品牌长页、H5 落地页",
+                    "copyOutline": "object，可选，可直接传文案结构",
+                    "imageAssets": "object[]，可选，结构化图片素材清单，包含名字、段落、图片地址",
                 },
             },
         ]
@@ -150,17 +180,25 @@ class AgUiAgentService:
                 "content": (
                     "你是 DesignCraft 的顶层 Agent。"
                     "你可以自由决定是否调用工具，也可以直接给出最终答复。"
-                    "你的唯一可用工具只有：ask_followup、search_content、create_image、store_result。"
+                    "你的唯一可用工具只有：ask_followup、search_content、create_copy、create_image、store_result、compose_web。"
                     "请基于当前上下文选择最合适的一步。"
                     "如果用户只是咨询建议，可直接 final。"
                     "如果用户要图片，通常需要 create_image。"
                     "如果已经拿到 resultUrls 且还没有 storedResults，通常需要 store_result。"
+                    "如果用户要的是长图文、公众号排版、图文长页、H5 风格页面或可浏览的 Web 内容，"
+                    "你应该把任务拆成多步：先 search_content 补充资料，再 create_copy 生成文案结构，"
+                    "再按需要多次调用 create_image 为每段文本生成配图，必要时调用 store_result 固化图片地址，最后调用 compose_web 生成网页。"
+                    "你可以多次循环调用 create_copy 和 create_image，不要急着一次做完。"
+                    "create_copy、create_image、store_result 这些子任务的结构化结果，都会累积在当前 state 中返回给你。"
+                    "你在决定 compose_web 时，应该优先查看 state.latestCopyResult 和 state.imageArtifacts，确认每张图对应哪一段内容。"
+                    "在这类 Web 内容场景里，不要直接把 HTML 放进 finalResponse，必须通过 compose_web 工具输出。"
                     "如果用户信息明显不足，暂时无法稳定交付高质量结果，应优先调用 ask_followup。"
                     "ask_followup 的 question、options、inputPlaceholder 都必须是亲切自然的中文。"
                     "`thinking` 和 `finalResponse` 必须始终使用自然、亲切、简洁的中文，不要返回英文，也不要中英夹杂。"
                     "即使是思考摘要，也请直接写给用户可读的中文短句。"
                     "除非用户明确要求英文，否则不要输出英文。"
                     "`finalResponse` 必须是一句简短中文，不要使用 Markdown 超链接、不要输出 URL、不要写“点击查看”。"
+                    "当 compose_web 已经完成时，只需要简洁告诉用户图文内容已经排版好了。"
                     "如果图片已经生成完成，只需要简洁告诉用户“图片已经生成好了，可以继续调整”。"
                     "只返回严格 JSON："
                     "{\"thinking\":\"...\",\"actionType\":\"tool|final\",\"toolName\":\"...\",\"toolArgs\":{},\"finalResponse\":\"...\"}"
@@ -234,12 +272,18 @@ class AgUiAgentService:
             count = int(toolArgs.get("count") or self.settings.agUiSearchResultLimit)
             return await self.searchService.searchContent(query, count)
 
+        if toolName == "create_copy":
+            return await self._createCopy(toolArgs, parsedRequest, state)
+
         if toolName == "create_image":
             assetUrls = self._mergeUnique(toolArgs.get("assetUrls", []), parsedRequest.assetUrls)
             aspectRatio = toolArgs.get("aspectRatio") or parsedRequest.aspectRatio or self.settings.defaultAspectRatio
             imageCount = int(toolArgs.get("imageCount") or parsedRequest.imageCount or self.settings.defaultImageCount)
             generationMode = self._normalizeGenerationMode(toolArgs.get("generationMode"), assetUrls)
             prompt = str(toolArgs.get("prompt") or parsedRequest.combinedUserContext or parsedRequest.userInput)
+            assetName = str(toolArgs.get("assetName") or "配图").strip() or "配图"
+            targetSectionId = str(toolArgs.get("targetSectionId") or "").strip()
+            targetSectionTitle = str(toolArgs.get("targetSectionTitle") or "").strip()
 
             request = DesignGenerateRequest(
                 userInput=prompt,
@@ -276,21 +320,59 @@ class AgUiAgentService:
             )
             resultPayload = finalResult.model_dump()
             resultPayload["plan"] = plan.model_dump()
+            resultPayload["assetName"] = assetName
+            resultPayload["targetSectionId"] = targetSectionId
+            resultPayload["targetSectionTitle"] = targetSectionTitle
+            resultPayload["prompt"] = prompt
+            resultPayload["artifactId"] = self._buildImageArtifactId(targetSectionId, assetName, submitted.taskId)
             return resultPayload
 
         if toolName == "store_result":
             latestImageResult = state.get("latestImageResult") or {}
-            taskId = str(toolArgs.get("taskId") or latestImageResult.get("taskId") or "")
-            resultUrls = toolArgs.get("resultUrls") or latestImageResult.get("resultUrls") or []
             outputKeyPrefix = str(toolArgs.get("outputKeyPrefix") or parsedRequest.outputKeyPrefix)
-            if not taskId or not resultUrls:
-                raise AppError("store_result 缺少 taskId 或 resultUrls。", statusCode=422, code="invalid_store_result_args")
-            storedResults = await self.designService.storeGeneratedResults(taskId, resultUrls, outputKeyPrefix)
+            artifactsArg = toolArgs.get("artifacts")
+            if isinstance(artifactsArg, list):
+                artifacts = [item for item in artifactsArg if isinstance(item, dict)]
+            else:
+                taskId = str(toolArgs.get("taskId") or latestImageResult.get("taskId") or "")
+                resultUrls = toolArgs.get("resultUrls") or latestImageResult.get("resultUrls") or []
+                if not taskId or not resultUrls:
+                    raise AppError("store_result 缺少 taskId 或 resultUrls。", statusCode=422, code="invalid_store_result_args")
+                artifacts = [
+                    {
+                        "artifactId": str(toolArgs.get("artifactId") or latestImageResult.get("artifactId") or self._buildImageArtifactId("", "配图", taskId)),
+                        "taskId": taskId,
+                        "resultUrls": resultUrls,
+                        "assetName": str(toolArgs.get("assetName") or latestImageResult.get("assetName") or "配图"),
+                        "targetSectionId": str(toolArgs.get("targetSectionId") or latestImageResult.get("targetSectionId") or ""),
+                        "targetSectionTitle": str(toolArgs.get("targetSectionTitle") or latestImageResult.get("targetSectionTitle") or ""),
+                    }
+                ]
+
+            if not artifacts:
+                raise AppError("store_result 缺少可转存的 artifacts。", statusCode=422, code="invalid_store_result_args")
+
+            storedArtifacts = await self.designService.storeGeneratedArtifactBatch(artifacts, outputKeyPrefix)
+            flatStoredResults = [
+                result
+                for artifact in storedArtifacts
+                for result in artifact.get("storedResults", [])
+                if isinstance(result, dict)
+            ]
+            primaryArtifact = storedArtifacts[0] if storedArtifacts else {}
             return {
-                "taskId": taskId,
-                "storedResults": [item.model_dump() for item in storedResults],
+                "taskId": str(primaryArtifact.get("taskId") or ""),
+                "storedResults": flatStoredResults,
+                "storedArtifacts": storedArtifacts,
                 "outputKeyPrefix": outputKeyPrefix,
+                "artifactId": str(primaryArtifact.get("artifactId") or ""),
+                "assetName": str(primaryArtifact.get("assetName") or ""),
+                "targetSectionId": str(primaryArtifact.get("targetSectionId") or ""),
+                "targetSectionTitle": str(primaryArtifact.get("targetSectionTitle") or ""),
             }
+
+        if toolName == "compose_web":
+            return await self._composeWeb(toolArgs, parsedRequest, state)
 
         raise AppError(f"不支持的工具：{toolName}", statusCode=422, code="unsupported_tool")
 
@@ -303,14 +385,29 @@ class AgUiAgentService:
             state["latestSearch"] = resultPayload
             return
 
+        if toolName == "create_copy":
+            state["latestCopyResult"] = resultPayload
+            return
+
         if toolName == "create_image":
             state["latestImageResult"] = resultPayload
+            self._upsertImageArtifact(resultPayload, state)
             return
 
         if toolName == "store_result" and isinstance(resultPayload, dict):
             latestImageResult = state.get("latestImageResult")
             if isinstance(latestImageResult, dict):
                 latestImageResult["storedResults"] = resultPayload.get("storedResults", [])
+            storedArtifacts = resultPayload.get("storedArtifacts")
+            if isinstance(storedArtifacts, list):
+                for artifact in storedArtifacts:
+                    self._upsertImageArtifact(artifact, state)
+            else:
+                self._upsertImageArtifact(resultPayload, state)
+            return
+
+        if toolName == "compose_web":
+            state["latestWebResult"] = resultPayload
 
     def _normalizeDecision(
         self,
@@ -326,8 +423,14 @@ class AgUiAgentService:
 
         if actionType not in {"tool", "final"}:
             return self._fallbackDecision(parsedRequest, state)
-
-        if actionType == "tool" and toolName not in {"ask_followup", "search_content", "create_image", "store_result"}:
+        if actionType == "tool" and toolName not in {
+            "ask_followup",
+            "search_content",
+            "create_copy",
+            "create_image",
+            "store_result",
+            "compose_web",
+        }:
             return self._fallbackDecision(parsedRequest, state)
 
         return {
@@ -340,7 +443,96 @@ class AgUiAgentService:
 
     def _fallbackDecision(self, parsedRequest: ParsedAgentRequest, state: dict[str, Any]) -> dict[str, Any]:
         latestImageResult = state.get("latestImageResult")
+        latestCopyResult = state.get("latestCopyResult")
         latestSearch = state.get("latestSearch")
+        latestWebResult = state.get("latestWebResult")
+        imageArtifacts = self._getImageArtifacts(state)
+
+        if isinstance(latestWebResult, dict) and latestWebResult.get("html"):
+            return {
+                "thinking": "图文网页已经排版完成，可以直接向用户交付。",
+                "actionType": "final",
+                "toolName": "",
+                "toolArgs": {},
+                "finalResponse": self._fallbackFinalResponse(state),
+            }
+
+        if self._looksLikeWebRequest(parsedRequest.combinedUserContext or parsedRequest.userInput):
+            if self._shouldAskFollowUp(parsedRequest, state):
+                return {
+                    "thinking": "长图文页面还缺少一些关键信息，先补齐会更容易做得准确。",
+                    "actionType": "tool",
+                    "toolName": "ask_followup",
+                    "toolArgs": self._buildFollowUp(parsedRequest),
+                    "finalResponse": "",
+                }
+
+            if latestSearch is None and self._looksLikeSearchHelpful(parsedRequest.userInput):
+                return {
+                    "thinking": "这类图文内容通常需要先补充资料，我先去搜索一些参考信息。",
+                    "actionType": "tool",
+                    "toolName": "search_content",
+                    "toolArgs": {"query": parsedRequest.combinedUserContext or parsedRequest.userInput, "count": self.settings.agUiSearchResultLimit},
+                    "finalResponse": "",
+                }
+
+            if not isinstance(latestCopyResult, dict):
+                return {
+                    "thinking": "我先把长图文的标题、段落和内容结构整理出来。",
+                    "actionType": "tool",
+                    "toolName": "create_copy",
+                    "toolArgs": {
+                        "brief": parsedRequest.combinedUserContext or parsedRequest.userInput,
+                        "sections": 4,
+                    },
+                    "finalResponse": "",
+                }
+
+            pendingStoreArtifact = self._findPendingStoreArtifact(imageArtifacts)
+            if pendingStoreArtifact:
+                pendingArtifacts = self._findPendingStoreArtifacts(imageArtifacts)
+                return {
+                    "thinking": "我先把这一批新生成的图片统一转存，后面排版时就能稳定引用全部素材。",
+                    "actionType": "tool",
+                    "toolName": "store_result",
+                    "toolArgs": {
+                        "outputKeyPrefix": parsedRequest.outputKeyPrefix,
+                        "artifacts": pendingArtifacts,
+                    },
+                    "finalResponse": "",
+                }
+
+            nextImageSlot = self._findNextImageSlot(latestCopyResult, imageArtifacts)
+            if nextImageSlot:
+                return {
+                    "thinking": "我先把下一段内容需要的配图补齐，这样后面排版时每个段落都有对应素材。",
+                    "actionType": "tool",
+                    "toolName": "create_image",
+                    "toolArgs": {
+                        "prompt": self._buildImagePromptForSlot(parsedRequest, latestCopyResult, nextImageSlot),
+                        "aspectRatio": parsedRequest.aspectRatio or self.settings.defaultAspectRatio,
+                        "assetUrls": parsedRequest.assetUrls,
+                        "imageCount": 1,
+                        "generationMode": self._inferGenerationMode(parsedRequest.assetUrls),
+                        "assetName": nextImageSlot.get("assetName", ""),
+                        "targetSectionId": nextImageSlot.get("targetSectionId", ""),
+                        "targetSectionTitle": nextImageSlot.get("targetSectionTitle", ""),
+                    },
+                    "finalResponse": "",
+                }
+
+            return {
+                "thinking": "文案和图片都已经准备好了，接下来排成可浏览的图文网页。",
+                "actionType": "tool",
+                "toolName": "compose_web",
+                "toolArgs": {
+                    "title": latestCopyResult.get("title") or parsedRequest.userInput[:24],
+                    "layoutStyle": "公众号长图文",
+                    "copyOutline": latestCopyResult,
+                    "imageAssets": imageArtifacts,
+                },
+                "finalResponse": "",
+            }
 
         if isinstance(latestImageResult, dict):
             if latestImageResult.get("status") == "succeed" and latestImageResult.get("resultUrls") and not latestImageResult.get("storedResults"):
@@ -405,6 +597,10 @@ class AgUiAgentService:
         }
 
     def _fallbackFinalResponse(self, state: dict[str, Any], userInput: str = "") -> str:
+        latestWebResult = state.get("latestWebResult")
+        if isinstance(latestWebResult, dict) and latestWebResult.get("html"):
+            return "图文内容已经排版好了，你可以继续告诉我想怎么调整。"
+
         latestImageResult = state.get("latestImageResult")
         if isinstance(latestImageResult, dict):
             storedResults = latestImageResult.get("storedResults", [])
@@ -425,6 +621,9 @@ class AgUiAgentService:
         if not normalized:
             return self._fallbackFinalResponse(state)
 
+        if self._looksLikeHtmlDocument(normalized):
+            return self._fallbackFinalResponse(state)
+
         normalized = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", normalized)
         normalized = re.sub(r"https?://\S+", "", normalized)
         normalized = normalized.replace("点击查看", "").replace("点此查看", "").replace("查看大图", "")
@@ -442,6 +641,19 @@ class AgUiAgentService:
             normalized = f"{normalized}。"
 
         return normalized
+
+    def _looksLikeHtmlDocument(self, text: str) -> bool:
+        normalized = text.strip()
+        if not normalized:
+            return False
+
+        if re.search(r"<!doctype html|<html[\s>]|<body[\s>]", normalized, flags=re.IGNORECASE):
+            return True
+
+        htmlTagCount = len(
+            re.findall(r"<(div|section|article|header|footer|main|style|img|figure|p|h1|h2|h3)\b", normalized, flags=re.IGNORECASE)
+        )
+        return htmlTagCount >= 3 and "</" in normalized
 
     def _sanitizeFollowUp(self, followUp: Any, parsedRequest: ParsedAgentRequest) -> dict[str, Any]:
         if not isinstance(followUp, dict):
@@ -476,6 +688,8 @@ class AgUiAgentService:
             return False
 
         context = (parsedRequest.combinedUserContext or parsedRequest.userInput).strip()
+        if self._looksLikeWebRequest(context):
+            return False
         if len(context) >= 28:
             return False
 
@@ -526,6 +740,11 @@ class AgUiAgentService:
         keywords = ("生成", "图片", "图", "海报", "主图", "效果图", "banner", "封面", "设计图")
         return any(keyword in userInput for keyword in keywords)
 
+    def _looksLikeWebRequest(self, userInput: str) -> bool:
+        keywords = ("长图文", "公众号", "推文", "图文排版", "图文长页", "H5", "网页", "web", "落地页", "长图")
+        normalized = userInput.lower()
+        return any(keyword.lower() in normalized for keyword in keywords)
+
     def _looksLikeSearchHelpful(self, userInput: str) -> bool:
         keywords = ("搜索", "查", "调研", "参考", "案例", "卖点", "竞品", "风格")
         return any(keyword in userInput for keyword in keywords)
@@ -546,6 +765,481 @@ class AgUiAgentService:
         if inferred == "multi_image_edit":
             return "multi_image_edit"
         return "text_to_image"
+
+    async def _createCopy(
+        self,
+        toolArgs: dict[str, Any],
+        parsedRequest: ParsedAgentRequest,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        brief = str(toolArgs.get("brief") or parsedRequest.combinedUserContext or parsedRequest.userInput)
+        tone = str(toolArgs.get("tone") or "亲切、可信、有设计感")
+        sections = max(2, min(int(toolArgs.get("sections") or 4), 8))
+        latestSearch = state.get("latestSearch") if isinstance(state.get("latestSearch"), dict) else {}
+        searchSummary = self._summarizeSearchResults(latestSearch.get("results", []) if isinstance(latestSearch, dict) else [])
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是图文内容策划助手。"
+                    "请为公众号长图文、H5 或图文长页生成结构化文案。"
+                    "只返回 JSON："
+                    '{"title":"...","subtitle":"...","summary":"...","layoutStyle":"...","heroImagePrompt":"...","sections":[{"sectionId":"...","heading":"...","body":"...","imagePrompt":"..."}]}'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"用户需求：{brief}\n"
+                    f"整体语气：{tone}\n"
+                    f"段落数量：{sections}\n"
+                    f"搜索参考：{searchSummary or '无'}\n"
+                    "请输出适合中文图文页面的结构化内容。"
+                ),
+            },
+        ]
+
+        fallback = self._buildCopyFallback(brief, sections)
+        try:
+            rawContent = await self.designService.maasClient.createChatCompletion(
+                messages=messages,
+                model=self.settings.qiniuChatModel,
+                maxTokens=1200,
+                temperature=0.4,
+            )
+            parsed = json.loads(self._extractJson(rawContent))
+            return {
+                "title": str(parsed.get("title") or fallback["title"]),
+                "subtitle": str(parsed.get("subtitle") or fallback["subtitle"]),
+                "summary": str(parsed.get("summary") or fallback["summary"]),
+                "layoutStyle": str(parsed.get("layoutStyle") or "公众号长图文"),
+                "heroImagePrompt": str(parsed.get("heroImagePrompt") or fallback["heroImagePrompt"]),
+                "sections": self._normalizeCopySections(parsed.get("sections"), fallback["sections"]),
+            }
+        except Exception:
+            return fallback
+
+    async def _composeWeb(
+        self,
+        toolArgs: dict[str, Any],
+        parsedRequest: ParsedAgentRequest,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        rawCopyOutline = toolArgs.get("copyOutline")
+        if isinstance(rawCopyOutline, dict):
+            copyOutline: dict[str, Any] = rawCopyOutline
+        else:
+            stateCopyOutline = state.get("latestCopyResult")
+            copyOutline = stateCopyOutline if isinstance(stateCopyOutline, dict) else {}
+
+        imageAssets = toolArgs.get("imageAssets")
+        if not isinstance(imageAssets, list):
+            imageAssets = self._getImageArtifacts(state)
+
+        normalizedImageAssets = self._normalizeImageAssetsForCompose(imageAssets)
+        layoutStyle = str(toolArgs.get("layoutStyle") or copyOutline.get("layoutStyle") or "公众号长图文")
+        title = str(toolArgs.get("title") or copyOutline.get("title") or "图文内容")
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是中文内容页面设计师。"
+                    "请输出一个完整可渲染的 HTML 页面，用于公众号长图文、图文长页或 H5 风格内容。"
+                    "必须内联样式，排版美观，适合中文阅读。"
+                    "图片直接使用给定 URL，不要输出 Markdown。"
+                    "只返回 JSON：{\"title\":\"...\",\"summary\":\"...\",\"html\":\"<!doctype html>...\"}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"用户需求：{parsedRequest.combinedUserContext or parsedRequest.userInput}\n"
+                    f"页面风格：{layoutStyle}\n"
+                    f"文案结构：{json.dumps(copyOutline, ensure_ascii=False)}\n"
+                    f"图片素材：{json.dumps(normalizedImageAssets, ensure_ascii=False)}\n"
+                    "请生成适合前端直接预览的完整 HTML。"
+                ),
+            },
+        ]
+
+        fallbackHtml = self._buildWebHtmlFallback(title, copyOutline, normalizedImageAssets, layoutStyle)
+        try:
+            rawContent = await self.designService.maasClient.createChatCompletion(
+                messages=messages,
+                model=self.settings.qiniuChatModel,
+                maxTokens=2400,
+                temperature=0.3,
+            )
+            parsed = json.loads(self._extractJson(rawContent))
+            html = str(parsed.get("html") or "").strip()
+            if not self._looksLikeHtmlDocument(html):
+                html = fallbackHtml
+            return {
+                "title": str(parsed.get("title") or title),
+                "summary": str(parsed.get("summary") or "图文内容已经整理并排版完成。"),
+                "layoutStyle": layoutStyle,
+                "html": html,
+                "imageAssets": normalizedImageAssets,
+            }
+        except Exception:
+            return {
+                "title": title,
+                "summary": "图文内容已经整理并排版完成。",
+                "layoutStyle": layoutStyle,
+                "html": fallbackHtml,
+                "imageAssets": normalizedImageAssets,
+            }
+
+    def _normalizeCopySections(self, sections: Any, fallbackSections: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not isinstance(sections, list):
+            return fallbackSections
+
+        normalized: list[dict[str, str]] = []
+        for index, item in enumerate(sections):
+            if not isinstance(item, dict):
+                continue
+            sectionId = str(item.get("sectionId") or self._buildSectionId(str(item.get("heading") or ""), index)).strip()
+            heading = str(item.get("heading") or "").strip()
+            body = str(item.get("body") or "").strip()
+            imagePrompt = str(item.get("imagePrompt") or "").strip()
+            if heading and body:
+                normalized.append(
+                    {
+                        "sectionId": sectionId or f"section-{index + 1}",
+                        "heading": heading,
+                        "body": body,
+                        "imagePrompt": imagePrompt or f"围绕“{heading}”生成适合图文排版的小节配图，画面清晰，质感统一。",
+                    }
+                )
+
+        return normalized or fallbackSections
+
+    def _buildCopyFallback(self, brief: str, sections: int) -> dict[str, Any]:
+        briefText = brief.strip() or "本次图文内容"
+        normalizedSections = [
+            {
+                "sectionId": "core-highlights",
+                "heading": "先看核心亮点",
+                "body": f"围绕“{briefText}”提炼最值得用户先看到的重点信息，让读者快速理解价值。",
+                "imagePrompt": f"为“{briefText}”生成一张突出核心亮点的头图，适合公众号或长图文开篇，画面简洁、有质感。",
+            },
+            {
+                "sectionId": "detail-expansion",
+                "heading": "再看细节展开",
+                "body": "补充场景、体验、风格和使用感受，让内容更完整，也更容易形成画面感。",
+                "imagePrompt": "生成一张体现使用场景和产品细节的配图，适合中文图文页面中段展示。",
+            },
+            {
+                "sectionId": "closing-cta",
+                "heading": "最后给出行动引导",
+                "body": "用自然、可信的中文收束整篇内容，引导用户继续了解、咨询或下单。",
+                "imagePrompt": "生成一张适合作为结尾收束的氛围配图，整体风格与前文统一。",
+            },
+        ]
+        while len(normalizedSections) < sections:
+            normalizedSections.insert(
+                -1,
+                {
+                    "sectionId": f"section-{len(normalizedSections)}",
+                    "heading": f"内容补充 {len(normalizedSections)}",
+                    "body": "补充一段更具体的卖点、场景或风格说明，让整页节奏更完整。",
+                    "imagePrompt": "生成一张辅助说明这一段内容的配图，保持整体视觉统一。",
+                },
+            )
+
+        return {
+            "title": briefText[:24],
+            "subtitle": "把关键信息排成一页更好读的中文内容。",
+            "summary": "已整理出适合长图文排版的标题、摘要和分节内容。",
+            "layoutStyle": "公众号长图文",
+            "heroImagePrompt": f"围绕“{briefText}”生成适合中文图文长页使用的头图，版面干净，光线自然，质感高级。",
+            "sections": normalizedSections[:sections],
+        }
+
+    def _getImageArtifacts(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        artifacts = state.get("imageArtifacts")
+        if isinstance(artifacts, list):
+            return [item for item in artifacts if isinstance(item, dict)]
+
+        latestImageResult = state.get("latestImageResult")
+        if isinstance(latestImageResult, dict):
+            return [
+                {
+                    "artifactId": str(latestImageResult.get("artifactId") or self._buildImageArtifactId(
+                        str(latestImageResult.get("targetSectionId") or ""),
+                        str(latestImageResult.get("assetName") or "配图"),
+                        str(latestImageResult.get("taskId") or ""),
+                    )),
+                    "taskId": str(latestImageResult.get("taskId") or ""),
+                    "assetName": str(latestImageResult.get("assetName") or "配图"),
+                    "targetSectionId": str(latestImageResult.get("targetSectionId") or ""),
+                    "targetSectionTitle": str(latestImageResult.get("targetSectionTitle") or ""),
+                    "prompt": str(latestImageResult.get("prompt") or ""),
+                    "status": str(latestImageResult.get("status") or ""),
+                    "resultUrls": [str(item) for item in latestImageResult.get("resultUrls", []) if item],
+                    "storedResults": [item for item in latestImageResult.get("storedResults", []) if isinstance(item, dict)],
+                }
+            ]
+        return []
+
+    def _upsertImageArtifact(self, payload: Any, state: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        artifacts = self._getImageArtifacts(state)
+        artifactId = str(payload.get("artifactId") or self._buildImageArtifactId(
+            str(payload.get("targetSectionId") or ""),
+            str(payload.get("assetName") or "配图"),
+            str(payload.get("taskId") or ""),
+        ))
+        artifact = {
+            "artifactId": artifactId,
+            "taskId": str(payload.get("taskId") or ""),
+            "assetName": str(payload.get("assetName") or "配图"),
+            "targetSectionId": str(payload.get("targetSectionId") or ""),
+            "targetSectionTitle": str(payload.get("targetSectionTitle") or ""),
+            "prompt": str(payload.get("prompt") or ""),
+            "status": str(payload.get("status") or ""),
+            "resultUrls": [str(item) for item in payload.get("resultUrls", []) if item],
+            "storedResults": [item for item in payload.get("storedResults", []) if isinstance(item, dict)],
+        }
+
+        existingIndex = next((index for index, item in enumerate(artifacts) if item.get("artifactId") == artifactId), -1)
+        if existingIndex >= 0:
+            existing = artifacts[existingIndex]
+            existing.update({key: value for key, value in artifact.items() if value not in ("", [], None)})
+        else:
+            artifacts.append(artifact)
+        state["imageArtifacts"] = artifacts
+
+    def _buildImageArtifactId(self, targetSectionId: str, assetName: str, taskId: str) -> str:
+        if targetSectionId:
+            return f"section::{targetSectionId}"
+        if assetName:
+            return f"name::{assetName}"
+        return f"task::{taskId}"
+
+    def _findPendingStoreArtifact(self, imageArtifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for artifact in imageArtifacts:
+            if artifact.get("status") == "succeed" and artifact.get("resultUrls") and not artifact.get("storedResults"):
+                return artifact
+        return None
+
+    def _findPendingStoreArtifacts(self, imageArtifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        pendingArtifacts: list[dict[str, Any]] = []
+        for artifact in imageArtifacts:
+            if artifact.get("status") == "succeed" and artifact.get("resultUrls") and not artifact.get("storedResults"):
+                pendingArtifacts.append(artifact)
+        return pendingArtifacts
+
+    def _findNextImageSlot(self, copyOutline: Any, imageArtifacts: list[dict[str, Any]]) -> dict[str, str] | None:
+        if not isinstance(copyOutline, dict):
+            return None
+
+        coveredSectionIds = {
+            str(item.get("targetSectionId") or "")
+            for item in imageArtifacts
+            if item.get("storedResults") or item.get("resultUrls")
+        }
+
+        sections = copyOutline.get("sections")
+        if not isinstance(sections, list):
+            return None
+
+        for index, item in enumerate(sections):
+            if not isinstance(item, dict):
+                continue
+            sectionId = str(item.get("sectionId") or self._buildSectionId(str(item.get("heading") or ""), index)).strip()
+            if sectionId in coveredSectionIds:
+                continue
+            return {
+                "targetSectionId": sectionId,
+                "targetSectionTitle": str(item.get("heading") or f"内容小节 {index + 1}"),
+                "assetName": f"{str(item.get('heading') or f'配图 {index + 1}').strip()}配图",
+                "imagePrompt": str(item.get("imagePrompt") or ""),
+            }
+        return None
+
+    def _normalizeImageAssetsForCompose(self, imageAssets: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in imageAssets:
+            if not isinstance(item, dict):
+                continue
+            storedResults = item.get("storedResults") if isinstance(item.get("storedResults"), list) else []
+            resultUrls = item.get("resultUrls") if isinstance(item.get("resultUrls"), list) else []
+            chosenUrl = ""
+            if storedResults:
+                firstStored = next((result for result in storedResults if isinstance(result, dict) and result.get("url")), None)
+                if isinstance(firstStored, dict):
+                    chosenUrl = str(firstStored.get("url") or "")
+            if not chosenUrl and resultUrls:
+                chosenUrl = str(resultUrls[0] or "")
+            if not chosenUrl:
+                continue
+            normalized.append(
+                {
+                    "artifactId": str(item.get("artifactId") or ""),
+                    "assetName": str(item.get("assetName") or "配图"),
+                    "targetSectionId": str(item.get("targetSectionId") or ""),
+                    "targetSectionTitle": str(item.get("targetSectionTitle") or ""),
+                    "url": chosenUrl,
+                    "prompt": str(item.get("prompt") or ""),
+                }
+            )
+        return normalized
+
+    def _buildImagePromptForSlot(
+        self,
+        parsedRequest: ParsedAgentRequest,
+        copyResult: Any,
+        slot: dict[str, str],
+    ) -> str:
+        slotPrompt = str(slot.get("imagePrompt") or "").strip()
+        if slotPrompt:
+            return slotPrompt
+
+        if isinstance(copyResult, dict):
+            title = str(copyResult.get("title") or "").strip()
+            summary = str(copyResult.get("summary") or "").strip()
+            sectionTitle = str(slot.get("targetSectionTitle") or "").strip()
+            if sectionTitle:
+                return f"{title}。围绕“小节 {sectionTitle}”生成一张适合图文排版的配图。{summary}".strip("。")
+
+        return self._buildImagePromptForWeb(parsedRequest, copyResult)
+
+    def _buildSectionId(self, heading: str, index: int) -> str:
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", heading.lower()).strip("-")
+        return normalized or f"section-{index + 1}"
+
+    def _summarizeSearchResults(self, results: Any) -> str:
+        if not isinstance(results, list) or not results:
+            return ""
+
+        summaryLines: list[str] = []
+        for item in results[:4]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            if title or snippet:
+                summaryLines.append(f"{title}：{snippet}".strip("："))
+        return "\n".join(summaryLines)
+
+    def _collectImageUrls(self, state: dict[str, Any]) -> list[str]:
+        imageUrls: list[str] = []
+        latestImageResult = state.get("latestImageResult")
+        if isinstance(latestImageResult, dict):
+            storedResults = latestImageResult.get("storedResults", [])
+            if isinstance(storedResults, list):
+                for item in storedResults:
+                    if isinstance(item, dict) and item.get("url"):
+                        imageUrls.append(str(item["url"]))
+            resultUrls = latestImageResult.get("resultUrls", [])
+            if isinstance(resultUrls, list):
+                for item in resultUrls:
+                    if item:
+                        imageUrls.append(str(item))
+
+        return self._mergeUnique(imageUrls)
+
+    def _buildImagePromptForWeb(self, parsedRequest: ParsedAgentRequest, copyResult: Any) -> str:
+        if isinstance(copyResult, dict):
+            imagePrompt = str(copyResult.get("heroImagePrompt") or copyResult.get("imagePrompt") or "").strip()
+            if imagePrompt:
+                return imagePrompt
+            title = str(copyResult.get("title") or "").strip()
+            summary = str(copyResult.get("summary") or "").strip()
+            if title or summary:
+                return f"{title}。{summary}。生成适合中文长图文网页排版的头图或配图，画面清晰，风格统一。".strip("。")
+        return f"{parsedRequest.combinedUserContext or parsedRequest.userInput}。生成适合长图文或公众号排版使用的配图，画面干净，信息表达清楚。".strip("。")
+
+    def _buildWebHtmlFallback(
+        self,
+        title: str,
+        copyOutline: dict[str, Any],
+        imageAssets: list[dict[str, Any]],
+        layoutStyle: str,
+    ) -> str:
+        safeTitle = escape(title or "图文内容")
+        safeSubtitle = escape(str(copyOutline.get("subtitle") or ""))
+        safeSummary = escape(str(copyOutline.get("summary") or ""))
+        rawSections = copyOutline.get("sections")
+        sections: list[Any] = rawSections if isinstance(rawSections, list) else []
+        heroImage = imageAssets[0] if imageAssets else None
+        imageMap = {str(item.get("targetSectionId") or ""): item for item in imageAssets if item.get("targetSectionId")}
+        sectionHtml = []
+        for index, item in enumerate(sections):
+            if not isinstance(item, dict):
+                continue
+            sectionId = str(item.get("sectionId") or self._buildSectionId(str(item.get("heading") or ""), index))
+            heading = escape(str(item.get("heading") or ""))
+            body = escape(str(item.get("body") or ""))
+            if not heading and not body:
+                continue
+            sectionImage = imageMap.get(sectionId)
+            imageFragment = ""
+            if sectionImage and sectionImage.get("url"):
+                imageFragment = (
+                    "<figure class='section-visual'>"
+                    f"<img src='{escape(str(sectionImage['url']), quote=True)}' alt='{escape(str(sectionImage.get('assetName') or heading or '配图'))}' />"
+                    "</figure>"
+                )
+            sectionHtml.append(
+                f"<section class='section'><h2>{heading or '内容小节'}</h2>{imageFragment}<p>{body}</p></section>"
+            )
+
+        heroImageHtml = ""
+        if heroImage and heroImage.get("url"):
+            heroImageHtml = (
+                "<figure class='visual'>"
+                f"<img src='{escape(str(heroImage['url']), quote=True)}' alt='{escape(str(heroImage.get('assetName') or '头图'))}' />"
+                "</figure>"
+            )
+
+        bodyHtml = "\n".join(
+            [
+                "<!doctype html>",
+                "<html lang='zh-CN'>",
+                "<head>",
+                "  <meta charset='UTF-8' />",
+                "  <meta name='viewport' content='width=device-width, initial-scale=1.0' />",
+                f"  <title>{safeTitle}</title>",
+                "  <style>",
+                "    :root { color-scheme: light; font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; }",
+                "    body { margin: 0; background: linear-gradient(180deg, #f7f4ee 0%, #eef3f8 100%); color: #1d2740; }",
+                "    .page { max-width: 840px; margin: 0 auto; padding: 48px 20px 72px; }",
+                "    .hero { padding: 40px 32px; border-radius: 28px; background: rgba(255,255,255,0.92); box-shadow: 0 24px 60px rgba(28,42,72,0.08); }",
+                "    .eyebrow { display: inline-block; padding: 6px 12px; border-radius: 999px; background: rgba(17,126,102,0.12); color: #0f6f59; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }",
+                "    h1 { margin: 18px 0 12px; font-size: 40px; line-height: 1.08; }",
+                "    .subtitle { margin: 0; color: #51607a; font-size: 18px; }",
+                "    .summary { margin-top: 18px; color: #42506a; font-size: 15px; line-height: 1.8; }",
+                "    .visual, .section { margin: 18px 0 0; padding: 22px; border-radius: 24px; background: rgba(255,255,255,0.88); box-shadow: 0 18px 40px rgba(28,42,72,0.06); }",
+                "    .visual img { display: block; width: 100%; border-radius: 18px; }",
+                "    .section-visual { margin: 0 0 16px; }",
+                "    .section-visual img { display: block; width: 100%; border-radius: 18px; }",
+                "    .section h2 { margin: 0 0 12px; font-size: 24px; }",
+                "    .section p { margin: 0; color: #4c5972; line-height: 1.9; font-size: 16px; white-space: pre-wrap; }",
+                "    @media (max-width: 720px) { .page { padding: 24px 14px 48px; } .hero { padding: 28px 20px; border-radius: 22px; } h1 { font-size: 30px; } }",
+                "  </style>",
+                "</head>",
+                "<body>",
+                "  <main class='page'>",
+                "    <section class='hero'>",
+                f"      <span class='eyebrow'>{escape(layoutStyle)}</span>",
+                f"      <h1>{safeTitle}</h1>",
+                f"      <p class='subtitle'>{safeSubtitle}</p>",
+                f"      <p class='summary'>{safeSummary}</p>",
+                "    </section>",
+                heroImageHtml,
+                *sectionHtml,
+                "  </main>",
+                "</body>",
+                "</html>",
+            ]
+        )
+        return bodyHtml
 
     def _parseAgentInput(self, agentInput: RunAgentInput) -> ParsedAgentRequest:
         latestUserMessage = next((message for message in reversed(agentInput.messages) if message.role == "user"), None)
@@ -600,12 +1294,18 @@ class AgUiAgentService:
                     assetUrls.append(imageUrl)
         return "\n".join(part for part in textParts if part).strip(), assetUrls
 
-    def _mergeUnique(self, *groups: list[str]) -> list[str]:
+    def _mergeUnique(self, *groups: Any) -> list[str]:
         merged: list[str] = []
         for group in groups:
-            for item in group:
+            if isinstance(group, str):
+                iterable: list[Any] = [group]
+            elif isinstance(group, (list, tuple, set)):
+                iterable = list(group)
+            else:
+                continue
+            for item in iterable:
                 if item and item not in merged:
-                    merged.append(item)
+                    merged.append(str(item))
         return merged
 
     def _extractJson(self, rawContent: str) -> str:
