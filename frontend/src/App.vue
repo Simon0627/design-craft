@@ -93,7 +93,7 @@ interface FollowUpCardState {
 
 const aspectRatioOptions = ["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"];
 const defaultPrompt =
-  "参考香薰机产品图，生成一张简洁、明亮、有质感的电商主图。";
+  "基于提供的客厅毛坯房原图，生成法式风格装修效果图，输出分辨率与参考图一致，构图 1:1 还原参考图视角";
 
 const view = ref<AppView>("home");
 const isRunning = ref(false);
@@ -115,6 +115,8 @@ const activeAssistantMessageId = ref<string | null>(null);
 const pendingRequestMessages = ref<AgUiMessage[]>([]);
 const followUpCards = reactive<Record<string, FollowUpCardState>>({});
 const pendingToolNames = reactive<Record<string, string>>({});
+const copiedWebDocumentId = ref("");
+const savingPdfDocumentId = ref("");
 const runSummary = reactive({
   status: "待开始",
   latestTaskId: "",
@@ -122,6 +124,8 @@ const runSummary = reactive({
 });
 
 let activeAbortController: AbortController | null = null;
+let copyFeedbackTimer: number | null = null;
+let pdfFeedbackTimer: number | null = null;
 
 const uploadedAssets = computed(() =>
   composerAssets.value.filter((asset) => asset.status === "uploaded"),
@@ -670,6 +674,94 @@ function addPreviewImageAsReference(image: PreviewImage): void {
     status: "uploaded",
     uploadedUrl: image.url,
     errorMessage: "",
+  });
+}
+
+async function writeTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+async function copyWebDocumentCode(documentPreview: WebPreviewDocument): Promise<void> {
+  const html = documentPreview.html?.trim();
+  if (!html) {
+    return;
+  }
+
+  await writeTextToClipboard(html);
+  copiedWebDocumentId.value = documentPreview.id;
+  if (copyFeedbackTimer) {
+    window.clearTimeout(copyFeedbackTimer);
+  }
+  copyFeedbackTimer = window.setTimeout(() => {
+    if (copiedWebDocumentId.value === documentPreview.id) {
+      copiedWebDocumentId.value = "";
+    }
+  }, 1800);
+}
+
+async function saveWebDocumentAsPdf(documentPreview: WebPreviewDocument): Promise<void> {
+  savingPdfDocumentId.value = documentPreview.id;
+  if (pdfFeedbackTimer) {
+    window.clearTimeout(pdfFeedbackTimer);
+  }
+
+  const printFrame = document.createElement("iframe");
+  printFrame.style.position = "fixed";
+  printFrame.style.right = "0";
+  printFrame.style.bottom = "0";
+  printFrame.style.width = "0";
+  printFrame.style.height = "0";
+  printFrame.style.border = "0";
+  printFrame.style.opacity = "0";
+
+  const cleanup = (): void => {
+    if (printFrame.parentNode) {
+      printFrame.parentNode.removeChild(printFrame);
+    }
+    pdfFeedbackTimer = window.setTimeout(() => {
+      if (savingPdfDocumentId.value === documentPreview.id) {
+        savingPdfDocumentId.value = "";
+      }
+    }, 1200);
+  };
+
+  await new Promise<void>((resolve) => {
+    printFrame.onload = () => {
+      window.setTimeout(() => {
+        try {
+          printFrame.contentWindow?.focus();
+          printFrame.contentWindow?.print();
+        } finally {
+          cleanup();
+          resolve();
+        }
+      }, 180);
+    };
+
+    if (documentPreview.html) {
+      printFrame.srcdoc = documentPreview.html;
+    } else if (documentPreview.url) {
+      printFrame.src = documentPreview.url;
+    } else {
+      cleanup();
+      resolve();
+      return;
+    }
+
+    document.body.appendChild(printFrame);
   });
 }
 
@@ -1441,6 +1533,12 @@ function stopCurrentRun(): void {
 }
 
 onBeforeUnmount(() => {
+  if (copyFeedbackTimer) {
+    window.clearTimeout(copyFeedbackTimer);
+  }
+  if (pdfFeedbackTimer) {
+    window.clearTimeout(pdfFeedbackTimer);
+  }
   resetConversationState();
 });
 </script>
@@ -1500,6 +1598,14 @@ onBeforeUnmount(() => {
             :key="asset.id"
             class="asset-card"
           >
+            <button
+              aria-label="删除参考素材"
+              class="asset-remove"
+              type="button"
+              @click="removeAsset(asset.id)"
+            >
+              ×
+            </button>
             <img
               :alt="asset.name"
               :src="asset.previewUrl"
@@ -1507,32 +1613,27 @@ onBeforeUnmount(() => {
             />
             <div class="asset-meta">
               <strong>{{ asset.name }}</strong>
-              <span>{{ formatFileSize(asset.size) }}</span>
-              <span v-if="asset.width && asset.height"
-                >{{ asset.width }} × {{ asset.height }}</span
-              >
-              <span :class="['asset-status', asset.status]">
-                {{
-                  asset.status === "uploaded"
-                    ? "已上传"
-                    : asset.status === "uploading"
-                      ? "上传中"
-                      : asset.status === "error"
-                        ? "上传失败"
-                        : "待上传"
-                }}
-              </span>
+              <div class="asset-meta-row">
+                <span>{{ formatFileSize(asset.size) }}</span>
+                <span v-if="asset.width && asset.height"
+                  >{{ asset.width }} × {{ asset.height }}</span
+                >
+                <span :class="['asset-status', asset.status]">
+                  {{
+                    asset.status === "uploaded"
+                      ? "已上传"
+                      : asset.status === "uploading"
+                        ? "上传中"
+                        : asset.status === "error"
+                          ? "上传失败"
+                          : "待上传"
+                  }}
+                </span>
+              </div>
               <span v-if="asset.errorMessage" class="asset-error">{{
                 asset.errorMessage
               }}</span>
             </div>
-            <button
-              class="asset-remove"
-              type="button"
-              @click="removeAsset(asset.id)"
-            >
-              移除
-            </button>
           </article>
         </div>
 
@@ -1571,9 +1672,7 @@ onBeforeUnmount(() => {
       <main class="dialog-panel">
 
         <div class="status-strip">
-          <div>
-            <strong>{{ runSummary.status }}</strong>
-          </div>
+          <strong>{{ runSummary.status }}</strong>
           <span v-if="runSummary.latestTaskId"
             >任务 ID：{{ runSummary.latestTaskId }}</span
           >
@@ -1681,7 +1780,7 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <div class="composer-card conversation-composer">
+        <div>
           <textarea
             v-model="promptText"
             class="prompt-textarea compact"
@@ -1776,16 +1875,6 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div v-if="previewMode === 'image' && currentPreviewBatch" class="preview-batch-meta">
-            <strong>{{ currentPreviewBatch.title }}</strong>
-            <span>{{ currentPreviewBatch.subtitle }}</span>
-          </div>
-
-          <div v-if="previewMode === 'web' && currentWebPreviewBatch" class="preview-batch-meta">
-            <strong>{{ currentWebPreviewBatch.title }}</strong>
-            <span>{{ currentWebPreviewBatch.subtitle }}</span>
-          </div>
-
           <div v-if="previewMode === 'image' && visiblePreviewImages.length > 0" class="preview-grid">
             <article
               v-for="image in visiblePreviewImages"
@@ -1825,6 +1914,28 @@ onBeforeUnmount(() => {
               :key="document.id"
               class="web-preview-item"
             >
+              <div class="web-preview-toolbar">
+                <div class="web-preview-meta">
+                  <span>{{ document.source === "html" ? "HTML 预览" : "网页地址预览" }}</span>
+                </div>
+                <div class="web-preview-actions">
+                  <button
+                    class="secondary-button preview-action"
+                    :disabled="!document.html"
+                    type="button"
+                    @click="copyWebDocumentCode(document)"
+                  >
+                    {{ copiedWebDocumentId === document.id ? "已复制" : "复制 H5 代码" }}
+                  </button>
+                  <button
+                    class="secondary-button preview-action"
+                    type="button"
+                    @click="saveWebDocumentAsPdf(document)"
+                  >
+                    {{ savingPdfDocumentId === document.id ? "正在打开..." : "保存为 PDF" }}
+                  </button>
+                </div>
+              </div>
 
               <iframe
                 v-if="document.html"
@@ -1864,6 +1975,14 @@ onBeforeUnmount(() => {
               :key="asset.id"
               class="asset-card"
             >
+              <button
+                aria-label="删除参考素材"
+                class="asset-remove"
+                type="button"
+                @click="removeAsset(asset.id)"
+              >
+                ×
+              </button>
               <img
                 :alt="asset.name"
                 :src="asset.previewUrl"
@@ -1871,18 +1990,26 @@ onBeforeUnmount(() => {
               />
               <div class="asset-meta">
                 <strong>{{ asset.name }}</strong>
-                <span>{{ formatFileSize(asset.size) }}</span>
-                <span :class="['asset-status', asset.status]">
-                  {{
-                    asset.status === "uploaded"
-                      ? "已上传"
-                      : asset.status === "uploading"
-                        ? "上传中"
-                        : asset.status === "error"
-                          ? "上传失败"
-                          : "待上传"
-                  }}
-                </span>
+                <div class="asset-meta-row">
+                  <span>{{ formatFileSize(asset.size) }}</span>
+                  <span v-if="asset.width && asset.height"
+                    >{{ asset.width }} × {{ asset.height }}</span
+                  >
+                  <span :class="['asset-status', asset.status]">
+                    {{
+                      asset.status === "uploaded"
+                        ? "已上传"
+                        : asset.status === "uploading"
+                          ? "上传中"
+                          : asset.status === "error"
+                            ? "上传失败"
+                            : "待上传"
+                    }}
+                  </span>
+                </div>
+                <span v-if="asset.errorMessage" class="asset-error">{{
+                  asset.errorMessage
+                }}</span>
               </div>
             </article>
           </div>
