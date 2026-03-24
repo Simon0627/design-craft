@@ -126,6 +126,9 @@ let activeAbortController: AbortController | null = null;
 const uploadedAssets = computed(() =>
   composerAssets.value.filter((asset) => asset.status === "uploaded"),
 );
+const hasReferenceAssets = computed(() => composerAssets.value.length > 0);
+const hasSearchReferences = computed(() => searchResults.value.length > 0);
+const hasContextPanel = computed(() => hasReferenceAssets.value || hasSearchReferences.value);
 const hasConversationFeed = computed(() => feedEntries.value.length > 0);
 const currentPreviewBatch = computed(() =>
   previewBatches.value.find((batch) => batch.id === selectedPreviewBatchId.value)
@@ -650,6 +653,26 @@ function getActivePreviewRoundId(): string {
   return activePreviewRoundId.value || activeRunId.value || threadId.value || createId("preview-round");
 }
 
+function addPreviewImageAsReference(image: PreviewImage): void {
+  const alreadyExists = composerAssets.value.some(
+    (asset) => asset.uploadedUrl === image.url || asset.previewUrl === image.url,
+  );
+  if (alreadyExists) {
+    return;
+  }
+
+  composerAssets.value.push({
+    id: createId("asset"),
+    file: new File([], image.title || "参考图.png", { type: "image/png" }),
+    name: image.title || "参考图.png",
+    size: 0,
+    previewUrl: image.url,
+    status: "uploaded",
+    uploadedUrl: image.url,
+    errorMessage: "",
+  });
+}
+
 function collectWebPreviewDocuments(payload: unknown): WebPreviewDocument[] {
   const documents: WebPreviewDocument[] = [];
 
@@ -818,13 +841,17 @@ function setWebPreviewDocuments(documents: WebPreviewDocument[], roundId: string
     return;
   }
 
-  const nextSource = documents[0]?.source ?? "html";
+  const finalDocument = documents[documents.length - 1];
+  if (!finalDocument) {
+    return;
+  }
+  const nextSource = finalDocument.source ?? "html";
   const nextBatch: WebPreviewBatch = {
     id: createId("web-preview-batch"),
     roundId,
     title: "最终 Web 结果",
-    subtitle: buildWebBatchSubtitle(documents.length, nextSource),
-    documents,
+    subtitle: buildWebBatchSubtitle(1, nextSource),
+    documents: [finalDocument],
   };
   webPreviewBatches.value = [nextBatch];
   selectedWebPreviewBatchId.value = nextBatch.id;
@@ -1534,7 +1561,13 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section v-else class="conversation-screen">
+    <section
+      v-else
+      :class="[
+        'conversation-screen',
+        { 'conversation-screen--wide-preview': !hasContextPanel },
+      ]"
+    >
       <main class="dialog-panel">
 
         <div class="status-strip">
@@ -1658,7 +1691,7 @@ onBeforeUnmount(() => {
 
           <div class="sender-footer conversation-actions">
             <label class="toolbar-button">
-              追加参考图
+              参考
               <input
                 accept="image/*"
                 class="hidden-input"
@@ -1670,7 +1703,7 @@ onBeforeUnmount(() => {
               />
             </label>
             <label class="ratio-select">
-              <span>图片比例</span>
+              <span>比例</span>
               <select v-model="aspectRatio" class="ratio-select-input">
                 <option value="">
                   由 Agent 决定
@@ -1686,13 +1719,13 @@ onBeforeUnmount(() => {
               type="button"
               @click="handleSubmit"
             >
-              {{ isRunning ? "运行中…" : "发送消息" }}
+              {{ isRunning ? "运行中…" : "发送" }}
             </button>
           </div>
         </div>
       </main>
 
-      <aside class="inspector-panel">
+      <section class="preview-panel">
         <section class="preview-card">
           <header class="card-header">
             <h3>结果预览</h3>
@@ -1728,7 +1761,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div
-            v-if="previewMode === 'image' && previewBatches.length > 0"
+            v-if="previewMode === 'image' && previewBatches.length > 1"
             class="preview-history"
           >
             <button
@@ -1754,13 +1787,10 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="previewMode === 'image' && visiblePreviewImages.length > 0" class="preview-grid">
-            <a
+            <article
               v-for="image in visiblePreviewImages"
               :key="image.id"
-              :href="image.url"
               class="preview-item"
-              rel="noreferrer"
-              target="_blank"
             >
               <img :alt="image.title" :src="image.url" />
               <div>
@@ -1769,7 +1799,24 @@ onBeforeUnmount(() => {
                   image.source === "stored" ? "已转存" : "临时结果"
                 }}</span>
               </div>
-            </a>
+              <div class="preview-item-actions">
+                <button
+                  class="secondary-button preview-action"
+                  type="button"
+                  @click="addPreviewImageAsReference(image)"
+                >
+                  设为参考图
+                </button>
+                <a
+                  :href="image.url"
+                  class="preview-link"
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  查看大图
+                </a>
+              </div>
+            </article>
           </div>
 
           <div v-else-if="previewMode === 'web' && visibleWebDocuments.length > 0" class="web-preview-list">
@@ -1778,21 +1825,7 @@ onBeforeUnmount(() => {
               :key="document.id"
               class="web-preview-item"
             >
-              <div class="web-preview-toolbar">
-                <div class="web-preview-meta">
-                  <strong>{{ document.title }}</strong>
-                  <span>{{ document.source === "html" ? "即时预览" : "网页链接" }}</span>
-                </div>
-                <a
-                  v-if="document.url"
-                  :href="document.url"
-                  class="web-preview-link"
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  新窗口打开
-                </a>
-              </div>
+
               <iframe
                 v-if="document.html"
                 :srcdoc="document.html"
@@ -1816,14 +1849,16 @@ onBeforeUnmount(() => {
             }}
           </p>
         </section>
+      </section>
 
-        <section class="reference-card">
+      <aside v-if="hasContextPanel" class="context-panel">
+        <section v-if="hasReferenceAssets" class="reference-card">
           <header class="card-header">
             <h3>参考素材</h3>
             <span>{{ uploadedAssets.length }} 个已上传素材</span>
           </header>
 
-          <div v-if="composerAssets.length > 0" class="asset-grid compact">
+          <div class="asset-grid compact">
             <article
               v-for="asset in composerAssets"
               :key="asset.id"
@@ -1851,16 +1886,15 @@ onBeforeUnmount(() => {
               </div>
             </article>
           </div>
-          <p v-else class="empty-text">还没有参考图，可以在左下角继续补充。</p>
         </section>
 
-        <section class="search-card">
+        <section v-if="hasSearchReferences" class="search-card">
           <header class="card-header">
             <h3>搜索参考</h3>
             <span>{{ searchResults.length }} 条</span>
           </header>
 
-          <div v-if="searchResults.length > 0" class="search-list">
+          <div class="search-list">
             <a
               v-for="item in searchResults"
               :key="`${item.link}-${item.title}`"
@@ -1874,9 +1908,6 @@ onBeforeUnmount(() => {
               <p>{{ item.snippet || "暂无摘要" }}</p>
             </a>
           </div>
-          <p v-else class="empty-text">
-            如果 Agent 调用了内容搜索，这里会同步展示可点击的外部参考。
-          </p>
         </section>
       </aside>
     </section>
