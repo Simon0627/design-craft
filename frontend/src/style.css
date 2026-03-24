@@ -155,6 +155,11 @@ a {
   backdrop-filter: blur(18px);
 }
 
+.composer-card {
+  padding: 17px;
+}
+
+
 .conversation-screen {
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr) minmax(280px, 0.72fr);
