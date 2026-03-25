@@ -31,9 +31,9 @@ class Settings(BaseSettings):
         default="https://api.qnaigc.com/v1",
         validation_alias="QINIU_MAAS_BASE_URL",
     )
-    qiniuChatModel: str = Field(default="deepseek-v3", validation_alias="QINIU_CHAT_MODEL")
+    qiniuChatModel: str = Field(default="z-ai/glm-5", validation_alias="QINIU_CHAT_MODEL")
     qiniuVisionModel: str = Field(default="doubao-seed-2.0-lite", validation_alias="QINIU_VISION_MODEL")
-    qiniuImageModel: str = Field(default="kling-v2-1", validation_alias="QINIU_IMAGE_MODEL")
+    qiniuImageModel: str = Field(default="kling-v3", validation_alias="QINIU_IMAGE_MODEL")
 
     serpApiKey: str = Field(default="", validation_alias="SERPAPI_API_KEY")
     serpApiBaseUrl: str = Field(default="https://serpapi.com/search.json", validation_alias="SERPAPI_BASE_URL")
