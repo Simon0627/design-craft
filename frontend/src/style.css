@@ -156,6 +156,9 @@ a {
 }
 
 .composer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
   padding: 17px;
 }
 
@@ -293,6 +296,16 @@ a {
   gap: 14px;
 }
 
+.composer-card .asset-grid {
+  grid-template-columns: repeat(auto-fill, minmax(132px, 168px));
+  justify-content: flex-start;
+  align-content: start;
+  gap: 12px;
+  max-height: min(34vh, 320px);
+  overflow-y: auto;
+  padding: 4px 2px 4px 0;
+}
+
 .asset-grid.compact {
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
 }
@@ -308,6 +321,13 @@ a {
   border: 1px solid rgba(214, 220, 232, 0.9);
 }
 
+.composer-card .asset-card {
+  width: 100%;
+  max-width: 168px;
+  padding: 10px;
+  gap: 10px;
+}
+
 .asset-preview {
   width: 100%;
   aspect-ratio: 1 / 1;
@@ -316,12 +336,22 @@ a {
   background: #e7ecf5;
 }
 
+.composer-card .asset-preview {
+  aspect-ratio: auto;
+  max-height: 148px;
+  object-fit: contain;
+}
+
 .asset-meta {
   display: flex;
   flex-direction: column;
   gap: 3px;
   color: #4f5d75;
   font-size: 12px;
+}
+
+.composer-card .asset-meta {
+  gap: 6px;
 }
 
 .asset-meta strong {
@@ -406,6 +436,10 @@ a {
   margin-top: 12px;
   color: #58657d;
   font-size: 13px;
+}
+
+.composer-card .sender-footer {
+  margin-top: 2px;
 }
 
 .conversation-actions {
@@ -1000,6 +1034,28 @@ a {
   .conversation-actions .primary-button {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .composer-card {
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .composer-toolbar {
+    align-items: stretch;
+  }
+
+  .composer-card .asset-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    max-height: min(32vh, 280px);
+  }
+
+  .composer-card .asset-card {
+    max-width: none;
+  }
+
+  .composer-card .asset-preview {
+    max-height: 132px;
   }
 
   .web-preview-toolbar {
