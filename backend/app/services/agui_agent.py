@@ -146,7 +146,7 @@ class AgUiAgentService:
             },
             {
                 "name": "create_image",
-                "description": "当用户需要产出图片时使用。你需要给出最终生图 prompt，并尽量说明这张图是给哪一段内容用的。",
+                "description": "当用户需要产出图片时使用。你需要结合风格、内容给出最终生图详细的 prompt。",
                 "args": {
                     "prompt": "string，最终生图提示词",
                     "aspectRatio": "string，枚举值：16:9、9:16、1:1、4:3、3:4、3:2、2:3、21:9",
