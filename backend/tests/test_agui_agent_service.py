@@ -56,6 +56,78 @@ def testFallbackDecisionChoosesReadReferenceImagesBeforeImageGeneration() -> Non
     assert decision["toolArgs"]["assetUrls"] == ["https://example.com/a.png"]
 
 
+def testFallbackDecisionChoosesCreateCopyForXiaohongshuRequest() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我做一套香薰机小红书图文笔记",
+        combinedUserContext="帮我做一套香薰机小红书图文笔记",
+        aspectRatio="3:4",
+    )
+
+    decision = service._fallbackDecision(
+        parsedRequest,
+        {
+            "latestImageResult": None,
+            "latestImageUnderstanding": None,
+            "latestSearch": None,
+        },
+    )
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "create_copy"
+    assert "小红书风格" in decision["toolArgs"]["tone"]
+    assert decision["toolArgs"]["sections"] == 4
+
+
+def testNormalizeDecisionRejectsComposeWebForXiaohongshu() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我做一套香薰机小红书图文笔记",
+        combinedUserContext="帮我做一套香薰机小红书图文笔记",
+    )
+
+    decision = service._normalizeDecision(
+        {
+            "actionType": "tool",
+            "toolName": "compose_web",
+            "toolArgs": {"title": "不应该走这里"},
+            "finalResponse": "",
+            "thinking": "准备排版网页",
+        },
+        parsedRequest,
+        {
+            "latestImageResult": None,
+            "latestImageUnderstanding": None,
+            "latestSearch": None,
+            "latestCopyResult": None,
+            "latestWebResult": None,
+            "imageArtifacts": [],
+        },
+    )
+
+    assert decision["toolName"] == "create_copy"
+
+
+def testFallbackDecisionChoosesAskFollowUpForVagueXiaohongshuRequest() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我做个小红书",
+        combinedUserContext="帮我做个小红书",
+    )
+
+    decision = service._fallbackDecision(
+        parsedRequest,
+        {
+            "latestImageResult": None,
+            "latestImageUnderstanding": None,
+            "latestSearch": None,
+        },
+    )
+
+    assert decision["actionType"] == "tool"
+    assert decision["toolName"] == "ask_followup"
+
+
 def testFallbackDecisionDoesNotReadReferenceImagesWhenPromptIsGeneric() -> None:
     service = createService()
     parsedRequest = ParsedAgentRequest(
@@ -251,6 +323,42 @@ def testFindNextImageSlotSkipsCoveredSections() -> None:
     assert slot["targetSectionId"] == "detail"
 
 
+def testBuildImagePromptForXiaohongshuIncludesSectionCopy() -> None:
+    service = createService()
+    parsedRequest = ParsedAgentRequest(
+        userInput="帮我做一篇香薰机小红书图文",
+        combinedUserContext="帮我做一篇香薰机小红书图文",
+    )
+
+    prompt = service._buildImagePromptForSlot(
+        parsedRequest,
+        {
+            "contentType": "xiaohongshu",
+            "seriesStylePrompt": "小红书图文卡片风格",
+            "sections": [
+                {
+                    "sectionId": "hook",
+                    "heading": "先说结论",
+                    "body": "这款香薰机放在卧室真的很治愈，颜值和氛围感都在线。",
+                    "imagePrompt": "生成一张小红书图文卡片",
+                }
+            ],
+        },
+        {
+            "targetSectionId": "hook",
+            "targetSectionTitle": "先说结论",
+            "assetName": "先说结论配图",
+            "imagePrompt": "生成一张小红书图文卡片",
+        },
+    )
+
+    assert "先说结论" in prompt
+    assert "这款香薰机放在卧室真的很治愈" in prompt
+    assert "二维插画" in prompt
+    assert "避免真实摄影风" in prompt
+    assert "不要在图片中加入任何可读文字" not in prompt
+
+
 def testSanitizeFinalResponseRemovesLinks() -> None:
     service = createService()
 
@@ -262,6 +370,38 @@ def testSanitizeFinalResponseRemovesLinks() -> None:
     assert "http" not in result
     assert "点击查看" not in result
     assert result == "图片已经生成好了，可以继续告诉我你想怎么调整。"
+
+
+def testSanitizeFinalResponseRemovesMarkdownForXiaohongshu() -> None:
+    service = createService()
+
+    result = service._sanitizeFinalResponse(
+        "# 标题\n- 第一条\n**加粗内容**\n```text\n代码块\n```",
+        {"latestCopyResult": {"contentType": "xiaohongshu", "title": "香薰机卧室分享"}},
+    )
+
+    assert "#" not in result
+    assert "**" not in result
+    assert "```" not in result
+    assert result.startswith("香薰机卧室分享\n")
+
+
+def testFallbackFinalResponseForXiaohongshuIncludesTitle() -> None:
+    service = createService()
+
+    result = service._fallbackFinalResponse(
+        {
+            "latestCopyResult": {
+                "contentType": "xiaohongshu",
+                "title": "香薰机卧室分享",
+                "caption": "✨ 今天来分享一款很治愈的香薰机",
+            },
+            "imageArtifacts": [{"storedResults": [{"url": "https://example.com/1.png"}]}],
+        },
+    )
+
+    assert result.startswith("香薰机卧室分享\n")
+    assert "✨ 今天来分享一款很治愈的香薰机" in result
 
 
 def testFallbackFinalResponseForWebResult() -> None:

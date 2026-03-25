@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import anyio
 
+from app.clients.kodo import KodoClient
 from app.core.config import Settings
 from app.schemas.design import DesignGenerateRequest, DesignPlanRequest
 from app.schemas.skill import SkillDescriptor
@@ -130,3 +131,18 @@ def testGenerateDesignBuildsMultiImagePayload() -> None:
     assert multiImage is True
     assert payload["image"] == ""
     assert len(payload["subject_image_list"]) == 2
+
+
+def testKodoBuildResultKeyUsesReadableNameAndIndex() -> None:
+    client = KodoClient(Settings(qiniuBucketName="design-craft", qiniuBucketDomain="cdn.example.com"))
+
+    key = client.buildResultKey(
+        taskId="task-123",
+        index=1,
+        sourceUrl="https://example.com/result.png",
+        prefix="generated",
+        assetName="卧室香薰机配图",
+        sectionId="hook",
+    )
+
+    assert key == "generated/task-123/hook/卧室香薰机配图-2.png"

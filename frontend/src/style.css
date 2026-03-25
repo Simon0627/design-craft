@@ -490,6 +490,8 @@ a {
 .message-bubble p {
   font-size: 13px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-bubble p,

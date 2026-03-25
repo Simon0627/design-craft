@@ -193,6 +193,18 @@ class AgUiAgentService:
                     "请基于当前上下文选择最合适的一步。"
                     "如果用户只是咨询建议，可直接 final。"
                     "如果用户要图片，通常需要 create_image。"
+                    "如果用户明确提到小红书、种草笔记、图文社媒卡片、社媒笔记等场景，不要调用额外的新工具。"
+                    "你应该复用 create_copy 和 create_image：先生成一篇带 emoji 的小红书文案，再根据每段文案生成多张风格统一的配图。"
+                    "小红书场景不需要 compose_web，最终直接把文案作为聊天回复返回给用户即可。"
+                    "这段文案不要带任何 Markdown 标记，不要有标题井号、加粗符号、列表符号或代码块。"
+                    "小红书图片默认比例是 3:4，风格要更可爱、卡通、二维、高饱和度，并保持整组图片在色调、装饰元素、氛围上的连续性。"
+                    "请优先把图片理解成插画感图文卡片，而不是照片。"
+                    "要主动强调：二维插画、平面设计、手绘/扁平、海报卡片感、非真实摄影、非写实产品照。"
+                    "注意：小红书场景里的图片应该和文案互相补充。"
+                    "如果某一段内容适合做成带大标题、重点句、清单或短段落的图文卡片，你应该把这些文字内容一并写进 create_image 的 prompt，"
+                    "让图里的文字表达和最终交付文案保持一致。"
+                    "如果小红书需求描述得很模糊，先 ask_followup。最终交付应该是一段文案 + 多张图片。"
+                    "小红书最终回复建议直接输出“标题 + 正文”，标题单独成行，正文可多行展开。"
                     "不是所有带参考图的任务都必须先 read_reference_images。"
                     "只有当参考图理解会明显帮助你判断主体、视角、构图、材质、空间结构、应保留元素，或者能让后续文案和提示词更具体时，才调用它。"
                     "如果任务明显依赖参考图理解，比如需要保留原图主体、视角、构图、空间结构、产品细节、材质、颜色、风格元素，"
@@ -444,6 +456,8 @@ class AgUiAgentService:
 
         if actionType not in {"tool", "final"}:
             return self._fallbackDecision(parsedRequest, state)
+        if actionType == "tool" and toolName == "compose_web" and self._looksLikeXiaohongshuRequest(parsedRequest.combinedUserContext or parsedRequest.userInput):
+            return self._fallbackDecision(parsedRequest, state)
         if actionType == "tool" and toolName not in {
             "ask_followup",
             "search_content",
@@ -474,6 +488,80 @@ class AgUiAgentService:
         if isinstance(latestWebResult, dict) and latestWebResult.get("html"):
             return {
                 "thinking": "图文网页已经排版完成，可以直接向用户交付。",
+                "actionType": "final",
+                "toolName": "",
+                "toolArgs": {},
+                "finalResponse": self._fallbackFinalResponse(state),
+            }
+
+        if self._looksLikeXiaohongshuRequest(parsedRequest.combinedUserContext or parsedRequest.userInput):
+            if self._shouldAskXiaohongshuFollowUp(parsedRequest, state):
+                return {
+                    "thinking": "小红书图文还缺少几个关键信息，先补齐会更容易做得更像一套完整笔记。",
+                    "actionType": "tool",
+                    "toolName": "ask_followup",
+                    "toolArgs": self._buildFollowUp(parsedRequest),
+                    "finalResponse": "",
+                }
+            if self._shouldReadReferenceImages(parsedRequest, state):
+                return {
+                    "thinking": "我先看一下参考图里的主体、风格和细节，这样后面的笔记文案和配图会更具体。",
+                    "actionType": "tool",
+                    "toolName": "read_reference_images",
+                    "toolArgs": {
+                        "focus": parsedRequest.combinedUserContext or parsedRequest.userInput,
+                        "assetUrls": parsedRequest.assetUrls,
+                    },
+                    "finalResponse": "",
+                }
+            if not isinstance(latestCopyResult, dict):
+                return {
+                    "thinking": "我先把这篇小红书的文案整理出来，再按每段内容去配图。",
+                    "actionType": "tool",
+                    "toolName": "create_copy",
+                    "toolArgs": {
+                        "brief": parsedRequest.combinedUserContext or parsedRequest.userInput,
+                        "tone": "小红书风格，带 emoji，亲切、种草感强、适合社媒发布",
+                        "sections": 4,
+                    },
+                    "finalResponse": "",
+                }
+
+            pendingStoreArtifact = self._findPendingStoreArtifact(imageArtifacts)
+            if pendingStoreArtifact:
+                pendingArtifacts = self._findPendingStoreArtifacts(imageArtifacts)
+                return {
+                    "thinking": "我先把这一组小红书配图统一转存，保证交付时拿到的是完整图片。",
+                    "actionType": "tool",
+                    "toolName": "store_result",
+                    "toolArgs": {
+                        "outputKeyPrefix": parsedRequest.outputKeyPrefix,
+                        "artifacts": pendingArtifacts,
+                    },
+                    "finalResponse": "",
+                }
+
+            nextImageSlot = self._findNextImageSlot(latestCopyResult, imageArtifacts)
+            if nextImageSlot:
+                return {
+                    "thinking": "我继续根据文案内容补齐下一张配图，保持整组图片的风格和氛围一致。",
+                    "actionType": "tool",
+                    "toolName": "create_image",
+                    "toolArgs": {
+                        "prompt": self._buildImagePromptForSlot(parsedRequest, latestCopyResult, nextImageSlot, latestImageUnderstanding),
+                        "aspectRatio": parsedRequest.aspectRatio or "3:4",
+                        "assetUrls": parsedRequest.assetUrls,
+                        "imageCount": 1,
+                        "generationMode": self._inferGenerationMode(parsedRequest.assetUrls),
+                        "assetName": nextImageSlot.get("assetName", ""),
+                        "targetSectionId": nextImageSlot.get("targetSectionId", ""),
+                        "targetSectionTitle": nextImageSlot.get("targetSectionTitle", ""),
+                    },
+                    "finalResponse": "",
+                }
+
+            return {
+                "thinking": "小红书文案和配图都已经准备好了，可以直接交付给用户。",
                 "actionType": "final",
                 "toolName": "",
                 "toolArgs": {},
@@ -632,6 +720,16 @@ class AgUiAgentService:
         }
 
     def _fallbackFinalResponse(self, state: dict[str, Any], userInput: str = "") -> str:
+        latestCopyResult = state.get("latestCopyResult")
+        if isinstance(latestCopyResult, dict) and latestCopyResult.get("contentType") == "xiaohongshu":
+            imageArtifacts = self._getImageArtifacts(state)
+            hasDeliveredImages = any(item.get("storedResults") or item.get("resultUrls") for item in imageArtifacts)
+            if hasDeliveredImages:
+                formattedReply = self._formatXiaohongshuReply(latestCopyResult)
+                if formattedReply:
+                    return formattedReply
+                return "今日分享\n✨ 这篇小红书文案和配图已经准备好了\n📌 你可以继续告诉我想怎么调整"
+
         latestWebResult = state.get("latestWebResult")
         if isinstance(latestWebResult, dict) and latestWebResult.get("html"):
             return "图文内容已经排版好了，你可以继续告诉我想怎么调整。"
@@ -652,6 +750,10 @@ class AgUiAgentService:
         return "我已经处理好了，你可以继续告诉我下一步需求。"
 
     def _sanitizeFinalResponse(self, text: str, state: dict[str, Any]) -> str:
+        latestCopyResult = state.get("latestCopyResult")
+        if isinstance(latestCopyResult, dict) and latestCopyResult.get("contentType") == "xiaohongshu":
+            return self._formatXiaohongshuReply(latestCopyResult, text) or self._fallbackFinalResponse(state)
+
         normalized = text.strip()
         if not normalized:
             return self._fallbackFinalResponse(state)
@@ -675,6 +777,36 @@ class AgUiAgentService:
         elif not normalized.endswith(("。", "！", "？")):
             normalized = f"{normalized}。"
 
+        return normalized
+
+    def _formatXiaohongshuReply(self, copyResult: dict[str, Any], preferredText: str = "") -> str:
+        title = self._sanitizeXiaohongshuText(str(copyResult.get("title") or ""))
+        captionSource = preferredText.strip() or str(copyResult.get("caption") or "")
+        caption = self._sanitizeXiaohongshuText(captionSource)
+
+        if title and caption:
+            if caption.startswith(title):
+                return caption
+            return f"{title}\n{caption}"
+        if title:
+            return title
+        if caption:
+            return caption
+        return ""
+
+    def _sanitizeXiaohongshuText(self, text: str) -> str:
+        normalized = text.strip()
+        if not normalized:
+            return ""
+
+        normalized = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", normalized)
+        normalized = re.sub(r"https?://\S+", "", normalized)
+        normalized = re.sub(r"```[\s\S]*?```", "", normalized)
+        normalized = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", normalized)
+        normalized = re.sub(r"(?m)^\s*[-*+]\s+", "", normalized)
+        normalized = re.sub(r"(?m)^\s*\d+\.\s+", "", normalized)
+        normalized = normalized.replace("**", "").replace("__", "").replace("`", "")
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
         return normalized
 
     def _looksLikeHtmlDocument(self, text: str) -> bool:
@@ -751,6 +883,13 @@ class AgUiAgentService:
 
     def _buildFollowUp(self, parsedRequest: ParsedAgentRequest) -> dict[str, Any]:
         context = parsedRequest.combinedUserContext or parsedRequest.userInput
+        if self._looksLikeXiaohongshuRequest(context):
+            return {
+                "question": "为了把这套小红书图文做得更像一篇完整笔记，你更想突出哪一类内容？",
+                "options": ["产品种草", "经验攻略", "清单推荐", "前后对比"],
+                "inputPlaceholder": "也可以补充主题、人群、使用场景，或者你想要的语气和视觉感觉。",
+            }
+
         if any(keyword in context for keyword in ("客厅", "卧室", "餐厅", "空间", "家装", "效果图")):
             return {
                 "question": "我先补齐几个关键点，这样效果图会更贴近你的预期。你更偏向哪种风格？",
@@ -774,6 +913,21 @@ class AgUiAgentService:
     def _looksLikeImageRequest(self, userInput: str) -> bool:
         keywords = ("生成", "图片", "图", "海报", "主图", "效果图", "banner", "封面", "设计图")
         return any(keyword in userInput for keyword in keywords)
+
+    def _looksLikeXiaohongshuRequest(self, userInput: str) -> bool:
+        normalized = userInput.lower()
+        keywords = (
+            "小红书",
+            "种草",
+            "笔记",
+            "图文笔记",
+            "社媒图文",
+            "社媒笔记",
+            "红书",
+            "ins post",
+            "instagram post",
+        )
+        return any(keyword in normalized for keyword in keywords)
 
     def _looksLikeWebRequest(self, userInput: str) -> bool:
         keywords = ("长图文", "公众号", "推文", "图文排版", "图文长页", "H5", "网页", "web", "落地页", "长图")
@@ -820,6 +974,43 @@ class AgUiAgentService:
         )
         return any(keyword in context for keyword in keywords)
 
+    def _shouldAskXiaohongshuFollowUp(self, parsedRequest: ParsedAgentRequest, state: dict[str, Any]) -> bool:
+        if state.get("pendingFollowUp"):
+            return False
+        if sum(1 for item in parsedRequest.conversationHistory if item.get("role") == "user") >= 2:
+            return False
+
+        context = (parsedRequest.combinedUserContext or parsedRequest.userInput).strip()
+        if len(context) >= 24:
+            return False
+
+        detailKeywords = (
+            "产品",
+            "品牌",
+            "主题",
+            "功效",
+            "人群",
+            "场景",
+            "通勤",
+            "学生党",
+            "租房",
+            "护肤",
+            "穿搭",
+            "探店",
+            "清单",
+            "攻略",
+            "教程",
+            "对比",
+            "避雷",
+            "香薰",
+        )
+        detailCount = sum(1 for keyword in detailKeywords if keyword in context)
+        if detailCount >= 2:
+            return False
+        if detailCount >= 1 and len(context) >= 14:
+            return False
+        return True
+
     def _inferGenerationMode(self, assetUrls: list[str]) -> str:
         if len(assetUrls) >= 2:
             return "multi_image_edit"
@@ -850,31 +1041,65 @@ class AgUiAgentService:
         searchSummary = self._summarizeSearchResults(latestSearch.get("results", []) if isinstance(latestSearch, dict) else [])
         imageUnderstanding = state.get("latestImageUnderstanding") if isinstance(state.get("latestImageUnderstanding"), dict) else {}
         imageSummary = self._summarizeImageUnderstanding(imageUnderstanding)
+        isXiaohongshu = self._looksLikeXiaohongshuRequest(brief) or self._looksLikeXiaohongshuRequest(tone)
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是图文内容策划助手。"
-                    "请为公众号长图文、H5 或图文长页生成结构化文案。"
-                    "只返回 JSON："
-                    '{"title":"...","subtitle":"...","summary":"...","layoutStyle":"...","heroImagePrompt":"...","sections":[{"sectionId":"...","heading":"...","body":"...","imagePrompt":"..."}]}'
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"用户需求：{brief}\n"
-                    f"整体语气：{tone}\n"
-                    f"段落数量：{sections}\n"
-                    f"搜索参考：{searchSummary or '无'}\n"
-                    f"参考图理解：{imageSummary or '无'}\n"
-                    "请输出适合中文图文页面的结构化内容。"
-                ),
-            },
-        ]
+        if isXiaohongshu:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是小红书文案策划助手。"
+                        "请先生成一篇适合小红书发布的中文图文文案。"
+                        "文案要自然、轻快、可读，带适量 emoji 装饰。"
+                        "title 必须是适合直接展示的一行中文标题。"
+                        "caption 必须是可以直接发在聊天里的纯文本中文文案，不要带任何 Markdown 标记，不要输出 #、*、-、``` 这类格式符号。"
+                        "再把内容拆成多个小节，供后续逐张配图。"
+                        "图片需要和文案互相补充。"
+                        "imagePrompt 应该明确这一张图想呈现的版式、标题、重点句、正文摘录或清单内容，"
+                        "让图里的中文文案与对应段落保持一致，同时整体风格仍然可爱、卡通、二维、高饱和度。"
+                        "整体风格需要是二维插画、平面设计、手绘或扁平海报感，不要生成真实摄影风、写实产品照或 3D 渲染感画面，并保持系列感。"
+                        "只返回 JSON："
+                        '{"contentType":"xiaohongshu","title":"...","caption":"...","summary":"...","layoutStyle":"...","seriesStylePrompt":"...","sections":[{"sectionId":"...","heading":"...","body":"...","imagePrompt":"..."}]}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户需求：{brief}\n"
+                        f"整体语气：{tone}\n"
+                        f"段落数量：{sections}\n"
+                        f"搜索参考：{searchSummary or '无'}\n"
+                        f"参考图理解：{imageSummary or '无'}\n"
+                        "请输出适合小红书图文发布的完整文案和分节结构。"
+                    ),
+                },
+            ]
+            fallback = self._buildXiaohongshuCopyFallback(brief, sections)
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是图文内容策划助手。"
+                        "请为公众号长图文、H5 或图文长页生成结构化文案。"
+                        "只返回 JSON："
+                        '{"title":"...","subtitle":"...","summary":"...","layoutStyle":"...","heroImagePrompt":"...","sections":[{"sectionId":"...","heading":"...","body":"...","imagePrompt":"..."}]}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户需求：{brief}\n"
+                        f"整体语气：{tone}\n"
+                        f"段落数量：{sections}\n"
+                        f"搜索参考：{searchSummary or '无'}\n"
+                        f"参考图理解：{imageSummary or '无'}\n"
+                        "请输出适合中文图文页面的结构化内容。"
+                    ),
+                },
+            ]
+            fallback = self._buildCopyFallback(brief, sections)
 
-        fallback = self._buildCopyFallback(brief, sections)
         try:
             rawContent = await self.designService.maasClient.createChatCompletion(
                 messages=messages,
@@ -883,6 +1108,16 @@ class AgUiAgentService:
                 temperature=0.4,
             )
             parsed = json.loads(self._extractJson(rawContent))
+            if isXiaohongshu:
+                return {
+                    "contentType": "xiaohongshu",
+                    "title": str(parsed.get("title") or fallback["title"]),
+                    "caption": str(parsed.get("caption") or fallback["caption"]),
+                    "summary": str(parsed.get("summary") or fallback["summary"]),
+                    "layoutStyle": str(parsed.get("layoutStyle") or "小红书图文"),
+                    "seriesStylePrompt": str(parsed.get("seriesStylePrompt") or fallback["seriesStylePrompt"]),
+                    "sections": self._normalizeCopySections(parsed.get("sections"), fallback["sections"]),
+                }
             return {
                 "title": str(parsed.get("title") or fallback["title"]),
                 "subtitle": str(parsed.get("subtitle") or fallback["subtitle"]),
@@ -1082,6 +1317,55 @@ class AgUiAgentService:
             "sections": normalizedSections[:sections],
         }
 
+    def _buildXiaohongshuCopyFallback(self, brief: str, sections: int) -> dict[str, Any]:
+        briefText = brief.strip() or "这次分享主题"
+        normalizedSections = [
+            {
+                "sectionId": "hook",
+                "heading": "先抛出最想分享的点",
+                "body": "把最容易吸引人继续看下去的亮点放在前面，语气轻松一点，也更有种草感。",
+                "imagePrompt": "围绕开篇亮点生成一张小红书风格图文卡片，二维插画、扁平手绘、海报卡片感、非真实摄影、非写实产品照，可爱、卡通、高饱和度，画面精致、有装饰感，加入能概括这一段内容的中文大标题和一句重点文案。",
+            },
+            {
+                "sectionId": "detail-1",
+                "heading": "再讲具体体验",
+                "body": "把使用感受、场景、优点或对比写得更具体，让读者更容易共鸣。",
+                "imagePrompt": "围绕具体体验生成一张小红书风格图文卡片，二维插画、扁平手绘、海报卡片感、非真实摄影、非写实产品照，可爱、卡通、高饱和度，和前一张保持统一色调与装饰元素，加入对应体验的小标题和 2 到 3 句中文短文案。",
+            },
+            {
+                "sectionId": "detail-2",
+                "heading": "补一条更实用的信息",
+                "body": "补充一条更实用的提醒、建议或总结，让整篇内容更完整。",
+                "imagePrompt": "围绕实用信息生成一张小红书风格图文卡片，二维插画、扁平手绘、海报卡片感、非真实摄影、非写实产品照，可爱、卡通、高饱和度，保持系列感，加入清单式或要点式中文文案。",
+            },
+            {
+                "sectionId": "closing",
+                "heading": "最后轻轻收尾",
+                "body": "收尾可以更口语一点，也可以留一点互动空间，让整篇笔记更自然。",
+                "imagePrompt": "围绕结尾氛围生成一张小红书风格图文卡片，二维插画、扁平手绘、海报卡片感、非真实摄影、非写实产品照，可爱、卡通、高饱和度，画面统一有连续性，加入结尾总结和互动感中文短句。",
+            },
+        ]
+        while len(normalizedSections) < sections:
+            normalizedSections.insert(
+                -1,
+                {
+                    "sectionId": f"section-{len(normalizedSections)}",
+                    "heading": f"补充内容 {len(normalizedSections)}",
+                    "body": "补充一段更适合社媒传播的内容点，让整套图文节奏更完整。",
+                    "imagePrompt": "生成一张小红书风格图文卡片，二维插画、扁平手绘、海报卡片感、非真实摄影、非写实产品照，可爱、卡通、高饱和度，风格统一，并加入和这段内容一致的中文文案排版。",
+                },
+            )
+
+        return {
+            "contentType": "xiaohongshu",
+            "title": briefText[:24],
+            "caption": "✨ 今天想认真分享这件事\n💡 把我最想说的重点都整理成一篇小红书文案\n📌 如果你也喜欢这种感觉，继续告诉我想怎么调整",
+            "summary": "已整理出一篇适合小红书发布的文案和分节结构。",
+            "layoutStyle": "小红书图文",
+            "seriesStylePrompt": "小红书图文卡片风格，二维插画、扁平手绘、平面海报感、非真实摄影、非写实产品照、非 3D 渲染，可爱、卡通、高饱和度，色调统一，装饰元素有连续性，画面精致有氛围，允许加入清晰可读的中文标题、重点句和短段落排版。",
+            "sections": normalizedSections[:sections],
+        }
+
     def _getImageArtifacts(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         artifacts = state.get("imageArtifacts")
         if isinstance(artifacts, list):
@@ -1178,10 +1462,16 @@ class AgUiAgentService:
             sectionId = str(item.get("sectionId") or self._buildSectionId(str(item.get("heading") or ""), index)).strip()
             if sectionId in coveredSectionIds:
                 continue
+            heading = str(item.get("heading") or f"内容小节 {index + 1}").strip()
+            copyTitle = str(copyOutline.get("title") or "").strip()
+            if copyOutline.get("contentType") == "xiaohongshu" and copyTitle:
+                assetName = f"{copyTitle}-{heading}配图"
+            else:
+                assetName = f"{heading or f'配图 {index + 1}'}配图"
             return {
                 "targetSectionId": sectionId,
-                "targetSectionTitle": str(item.get("heading") or f"内容小节 {index + 1}"),
-                "assetName": f"{str(item.get('heading') or f'配图 {index + 1}').strip()}配图",
+                "targetSectionTitle": heading,
+                "assetName": assetName,
                 "imagePrompt": str(item.get("imagePrompt") or ""),
             }
         return None
@@ -1221,6 +1511,38 @@ class AgUiAgentService:
         slot: dict[str, str],
         imageUnderstanding: Any = None,
     ) -> str:
+        if isinstance(copyResult, dict) and copyResult.get("contentType") == "xiaohongshu":
+            sectionTitle = str(slot.get("targetSectionTitle") or "").strip()
+            slotPrompt = str(slot.get("imagePrompt") or "").strip()
+            sectionBody = ""
+            rawSections = copyResult.get("sections")
+            if isinstance(rawSections, list):
+                matched = next(
+                    (
+                        item
+                        for item in rawSections
+                        if isinstance(item, dict) and str(item.get("sectionId") or "") == str(slot.get("targetSectionId") or "")
+                    ),
+                    None,
+                )
+                if isinstance(matched, dict):
+                    sectionBody = str(matched.get("body") or "").strip()
+            textLayoutInstruction = ""
+            if sectionTitle or sectionBody:
+                textLayoutInstruction = self._mergePromptSegments(
+                    f"这张图需要承载和“{sectionTitle or '当前内容'}”一致的中文文案排版",
+                    f"图内主标题可概括为：{sectionTitle}" if sectionTitle else "",
+                    f"图内正文、重点句或清单内容请围绕这段文案展开：{sectionBody}" if sectionBody else "",
+                    "确保图里的文字表达与这一段文案一致，相互补充，不要写和正文无关的新内容",
+                    "整张图请保持二维插画、扁平手绘、平面海报卡片感，避免真实摄影风、写实产品照或 3D 渲染感",
+                )
+            return self._mergePromptSegments(
+                slotPrompt or f"围绕“小红书文案中的 {sectionTitle or '当前内容'}”生成一张风格化图文卡片，表达这一段的情绪和内容重点。",
+                str(copyResult.get("seriesStylePrompt") or "").strip(),
+                textLayoutInstruction,
+                self._summarizeImageUnderstanding(imageUnderstanding),
+            )
+
         slotPrompt = str(slot.get("imagePrompt") or "").strip()
         understandingSummary = self._summarizeImageUnderstanding(imageUnderstanding)
         if slotPrompt:

@@ -161,7 +161,7 @@ class KodoClient:
         safePrefix = prefix.strip("/ ") or "generated"
         safeSection = self._normalizeKeySegment(sectionId)
         safeName = self._normalizeKeySegment(assetName)
-        fileName = safeName or str(index)
+        fileName = f"{safeName}-{index + 1}" if safeName else str(index)
         if safeSection:
             return f"{safePrefix}/{taskId}/{safeSection}/{fileName}{suffix}"
         return f"{safePrefix}/{taskId}/{fileName}{suffix}"

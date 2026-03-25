@@ -338,9 +338,29 @@ function finishThinkingEntry(entryId: string | null): void {
   const detail = entry.detail.trim();
   const summary = detail ? truncateText(detail, 80) : "这一轮思考已经完成。";
   updateAgentEntry(entry.id, {
+    title: "思考摘要",
     status: "completed",
     summary,
     detail: detail && detail !== summary ? detail : "",
+  });
+}
+
+function ensureThinkingEntry(): void {
+  if (currentThinkingEntryId.value) {
+    return;
+  }
+
+  const thinkingId = createId("thinking");
+  currentThinkingEntryId.value = thinkingId;
+  addAgentEntry({
+    id: thinkingId,
+    kind: "agent",
+    category: "thinking",
+    title: "深度思考",
+    summary: "顶层 LLM 正在判断下一步该用什么工具。",
+    detail: "",
+    status: "running",
+    collapsed: true,
   });
 }
 
@@ -392,17 +412,16 @@ function describeToolArgs(
     const brief = String(payload.brief ?? "");
     const tone = String(payload.tone ?? "亲切、可信、有设计感");
     const sections = Number(payload.sections ?? 4);
+    const contentType = String(payload.contentType ?? "");
+    if (contentType === "xiaohongshu" || /小红书|种草|社媒/.test(tone) || /小红书|种草|笔记/.test(brief)) {
+      return {
+        summary: `正在整理一篇小红书文案，并拆成 ${sections} 个配图内容段落。`,
+        detail: `内容方向：${brief || "沿用用户当前需求"}\n文案语气：${tone}\n配图风格：可爱、卡通、二维、高饱和度，整组图片保持统一系列感`,
+      };
+    }
     return {
       summary: `正在整理图文内容结构，预计产出 ${sections} 个内容分节。`,
       detail: `内容方向：${brief || "沿用用户当前需求"}\n文案语气：${tone}`,
-    };
-  }
-
-  if (toolName === "read_reference_images") {
-    const summary = String(payload.summary ?? "").trim();
-    return {
-      summary: summary || "参考图已经理解完成，后续会据此细化提示词。",
-      detail: "",
     };
   }
 
@@ -503,10 +522,25 @@ function describeToolResult(
     };
   }
 
+  if (toolName === "read_reference_images") {
+    const summary = String(payload.summary ?? "").trim();
+    return {
+      summary: summary || "参考图已经理解完成，后续会据此细化提示词。",
+      detail: "",
+    };
+  }
+
   if (toolName === "create_copy") {
     const sections = Array.isArray(payload.sections)
       ? payload.sections as Array<Record<string, unknown>>
       : [];
+    if (String(payload.contentType ?? "") === "xiaohongshu") {
+      const caption = String(payload.caption ?? "").trim();
+      return {
+        summary: `小红书文案已经整理好了，共 ${sections.length} 个配图段落。`,
+        detail: caption || String(payload.summary ?? "已经拿到一版小红书文案。"),
+      };
+    }
     return {
       summary: `文案结构已经整理好了，共 ${sections.length} 个内容分节。`,
       detail:
@@ -1239,6 +1273,7 @@ function handleAgUiEvent(event: AgUiEvent): void {
     const stepName = String(event.stepName ?? "");
     if (stepName.startsWith("llm_decision_")) {
       awaitingThinking.value = true;
+      ensureThinkingEntry();
     }
     return;
   }
@@ -1251,18 +1286,7 @@ function handleAgUiEvent(event: AgUiEvent): void {
   if (event.type === "TEXT_MESSAGE_START") {
     const messageId = String(event.messageId ?? "");
     if (awaitingThinking.value) {
-      const thinkingId = createId("thinking");
-      currentThinkingEntryId.value = thinkingId;
-      addAgentEntry({
-        id: thinkingId,
-        kind: "agent",
-        category: "thinking",
-        title: "思考摘要",
-        summary: "正在整理本轮决策依据。",
-        detail: "",
-        status: "running",
-        collapsed: true,
-      });
+      ensureThinkingEntry();
       return;
     }
 
@@ -1278,6 +1302,7 @@ function handleAgUiEvent(event: AgUiEvent): void {
       const lines = extractLines(delta);
       if (lines.length > 0) {
         updateAgentEntry(currentThinkingEntryId.value, {
+          title: "深度思考",
           summary: truncateText(lines.join(" "), 80),
         });
       }
